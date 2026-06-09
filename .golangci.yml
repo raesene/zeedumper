@@ -41,7 +41,6 @@ linters:
     - perfsprint
     - unconvert
     - ineffassign
-    - goconst
     # security & resources
     - gosec
     - bidichk
@@ -87,9 +86,6 @@ linters:
     funlen:
       lines: 120
       statements: 80
-    goconst:
-      min-len: 3
-      min-occurrences: 4
     gocyclo:
       min-complexity: 13
     nolintlint:

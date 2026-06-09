@@ -27,5 +27,7 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          # Pinned for reproducible CI (matches the version used locally).
+          # Bump deliberately rather than tracking "latest".
+          version: v2.6.2
           args: --timeout 5m
