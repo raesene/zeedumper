@@ -2,6 +2,7 @@ package dumper
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 
@@ -74,7 +75,9 @@ func podProxyDiscoverer(labelSelector, scheme string, port int, pages []string) 
 		if err != nil {
 			return nil, fmt.Errorf("listing pods (%s): %w", labelSelector, err)
 		}
+
 		var targets []target
+
 		for _, pod := range pods.Items {
 			// https endpoints need the "https:" scheme prefix in the proxy
 			// path; http endpoints use bare name:port.
@@ -84,15 +87,18 @@ func podProxyDiscoverer(labelSelector, scheme string, port int, pages []string) 
 			} else {
 				hostPort = fmt.Sprintf("%s:%d", pod.Name, port)
 			}
+
 			targets = append(targets, target{
 				instance: pod.Name,
 				basePath: fmt.Sprintf("/api/v1/namespaces/%s/pods/%s/proxy", namespace, hostPort),
 				pages:    pages,
 			})
 		}
+
 		if len(targets) == 0 {
 			return nil, fmt.Errorf("no pods matched selector %q in namespace %q", labelSelector, namespace)
 		}
+
 		return targets, nil
 	}
 }
@@ -104,6 +110,7 @@ func discoverKubelets(ctx context.Context, cs kubernetes.Interface, _ string) ([
 	if err != nil {
 		return nil, fmt.Errorf("listing nodes: %w", err)
 	}
+
 	var targets []target
 	for _, node := range nodes.Items {
 		targets = append(targets, target{
@@ -112,9 +119,11 @@ func discoverKubelets(ctx context.Context, cs kubernetes.Interface, _ string) ([
 			pages:    []string{"flagz", "statusz", "configz"},
 		})
 	}
+
 	if len(targets) == 0 {
-		return nil, fmt.Errorf("no nodes found")
+		return nil, errors.New("no nodes found")
 	}
+
 	return targets, nil
 }
 
@@ -124,23 +133,29 @@ func ResolveComponents(requested []string) ([]string, error) {
 	if len(requested) == 0 {
 		return AllComponents, nil
 	}
+
 	known := make(map[string]bool, len(AllComponents))
 	for _, c := range AllComponents {
 		known[c] = true
 	}
+
 	seen := make(map[string]bool, len(requested))
 	for _, c := range requested {
 		if !known[c] {
 			return nil, fmt.Errorf("unknown component %q (known: %v)", c, AllComponents)
 		}
+
 		seen[c] = true
 	}
+
 	var out []string
+
 	for _, c := range AllComponents { // preserve canonical order
 		if seen[c] {
 			out = append(out, c)
 		}
 	}
+
 	return out, nil
 }
 
@@ -150,16 +165,20 @@ func filterPages(targetPages, requested []string) []string {
 	if len(requested) == 0 {
 		return targetPages
 	}
+
 	want := make(map[string]bool, len(requested))
 	for _, p := range requested {
 		want[p] = true
 	}
+
 	var out []string
+
 	for _, p := range targetPages {
 		if want[p] {
 			out = append(out, p)
 		}
 	}
+
 	return out
 }
 

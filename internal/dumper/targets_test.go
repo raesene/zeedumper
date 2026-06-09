@@ -26,9 +26,11 @@ func TestResolveComponents(t *testing.T) {
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
 			}
+
 			if tt.wantErr {
 				return
 			}
+
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("got %v, want %v", got, tt.want)
 			}
@@ -38,6 +40,7 @@ func TestResolveComponents(t *testing.T) {
 
 func TestFilterPages(t *testing.T) {
 	target := []string{"flagz", "statusz", "configz"}
+
 	tests := []struct {
 		name      string
 		requested []string

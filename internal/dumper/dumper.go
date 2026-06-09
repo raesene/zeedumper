@@ -1,3 +1,6 @@
+// Package dumper discovers Kubernetes components and retrieves their z-pages,
+// either through the API server proxy or, for loopback-bound components, via a
+// temporary host-network node agent.
 package dumper
 
 import (
@@ -30,6 +33,7 @@ func (o Options) nodePodImage() string {
 	if o.NodePodImage != "" {
 		return o.NodePodImage
 	}
+
 	return defaultNodePodImage
 }
 
@@ -39,6 +43,7 @@ func (o Options) runID() string {
 	if now.IsZero() {
 		now = time.Now()
 	}
+
 	return fmt.Sprintf("%x", now.UnixNano())[:8]
 }
 
@@ -55,6 +60,7 @@ func Run(ctx context.Context, client *k8s.Client, opts Options) (*Dump, error) {
 	if namespace == "" {
 		namespace = "kube-system"
 	}
+
 	now := opts.Now
 	if now.IsZero() {
 		now = time.Now()
@@ -69,11 +75,13 @@ func Run(ctx context.Context, client *k8s.Client, opts Options) (*Dump, error) {
 	// Loopback-bound components are gathered via the node-agent strategy when
 	// enabled; results are merged back into canonical order below.
 	nodeAgentResults := map[string]Component{}
+
 	if opts.UseNodePods {
 		gathered, err := gatherViaNodePods(ctx, client, components, opts.Pages, opts)
 		if err != nil {
 			return nil, err
 		}
+
 		for _, comp := range gathered {
 			nodeAgentResults[comp.Name] = comp
 		}
@@ -97,6 +105,7 @@ func Run(ctx context.Context, client *k8s.Client, opts Options) (*Dump, error) {
 				Pages: []Page{{Name: "-", Error: derr.Error()}},
 			})
 			dump.Components = append(dump.Components, comp)
+
 			continue
 		}
 
@@ -105,8 +114,10 @@ func Run(ctx context.Context, client *k8s.Client, opts Options) (*Dump, error) {
 			for _, page := range filterPages(tgt.pages, opts.Pages) {
 				inst.Pages = append(inst.Pages, fetchPage(ctx, client, tgt.basePath, page, opts.Timeout))
 			}
+
 			comp.Instances = append(comp.Instances, inst)
 		}
+
 		sortInstances(comp.Instances)
 		dump.Components = append(dump.Components, comp)
 	}
@@ -121,8 +132,10 @@ func fetchPage(ctx context.Context, client *k8s.Client, basePath, page string, t
 	p := Page{Name: page, Path: path}
 
 	reqCtx := ctx
+
 	if timeout > 0 {
 		var cancel context.CancelFunc
+
 		reqCtx, cancel = context.WithTimeout(ctx, timeout)
 		defer cancel()
 	}
@@ -142,9 +155,11 @@ func fetchPage(ctx context.Context, client *k8s.Client, basePath, page string, t
 		} else {
 			p.Error = err.Error()
 		}
+
 		return p
 	}
 
 	p.Content = string(body)
+
 	return p
 }

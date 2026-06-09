@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -43,7 +44,8 @@ const (
 	// monitoringClusterRole already grants GET on the /flagz, /statusz,
 	// /metrics and /healthz non-resource URLs the components serve.
 	monitoringClusterRole = "system:monitoring"
-	agentTokenPath        = "/var/run/secrets/kubernetes.io/serviceaccount/token"
+	//nolint:gosec // G101: this is the well-known projected-token mount path, not a credential.
+	agentTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 
 	markerStart = "@@ZD@@ "
 	markerCode  = "@@CODE@@ "
@@ -59,25 +61,24 @@ type fetchSpec struct {
 	url       string
 }
 
+// nodeWork is the set of endpoints to fetch from a single node.
+type nodeWork struct {
+	node  string
+	specs []fetchSpec
+}
+
 // gatherViaNodePods dumps loopback-bound components by creating a temporary
 // ServiceAccount + ClusterRoleBinding (to system:monitoring) and a host-network
 // pod on each eligible node. All created resources are removed before it
 // returns, including on error or cancellation.
 func gatherViaNodePods(ctx context.Context, client *k8s.Client, requested, pages []string, opts Options) ([]Component, error) {
-	// Which loopback components did the caller actually ask for?
-	wanted := map[string]localComponent{}
-	for _, lc := range localComponents {
-		for _, name := range requested {
-			if name == lc.name {
-				wanted[lc.name] = lc
-			}
-		}
-	}
+	wanted := wantedLocalComponents(requested)
 	if len(wanted) == 0 {
 		return nil, nil
 	}
 
 	cs := client.Clientset
+
 	namespace := opts.Namespace
 	if namespace == "" {
 		namespace = "kube-system"
@@ -88,138 +89,185 @@ func gatherViaNodePods(ctx context.Context, client *k8s.Client, requested, pages
 		return nil, fmt.Errorf("listing nodes: %w", err)
 	}
 
-	curlTimeout := int(opts.Timeout.Seconds())
-	if curlTimeout <= 0 {
-		curlTimeout = 10
-	}
-
-	// Build the per-node work list and track which components ended up with at
-	// least one eligible node (so we can report the rest as "no eligible node").
-	type nodeWork struct {
-		node  string
-		specs []fetchSpec
-	}
-	var work []nodeWork
-	covered := map[string]bool{}
-	for _, node := range nodes.Items {
-		controlPlane := isControlPlane(node)
-		var specs []fetchSpec
-		for _, lc := range wanted {
-			if lc.controlPlaneOnly && !controlPlane {
-				continue
-			}
-			for _, page := range filterPages(lc.pages, pages) {
-				specs = append(specs, fetchSpec{
-					component: lc.name,
-					page:      page,
-					url:       fmt.Sprintf("%s://127.0.0.1:%d/%s", lc.scheme, lc.port, page),
-				})
-				covered[lc.name] = true
-			}
-		}
-		if len(specs) > 0 {
-			work = append(work, nodeWork{node: node.Name, specs: specs})
-		}
-	}
-
+	work, covered := buildNodeWork(nodes.Items, wanted, pages)
 	results := map[string][]Instance{} // component -> instances
 
 	// Components asked for but with no eligible node (e.g. a managed control
 	// plane) get a clear placeholder rather than silently vanishing.
 	for name := range wanted {
 		if !covered[name] {
-			results[name] = append(results[name], Instance{
-				Name:  "(no eligible node)",
-				Pages: []Page{{Name: "-", Error: "no node in the cluster runs this component within reach of a host-network pod"}},
-			})
+			results[name] = append(results[name],
+				placeholderInstance("(no eligible node)", "no node in the cluster runs this component within reach of a host-network pod"))
 		}
 	}
 
 	if len(work) > 0 {
-		runID := opts.runID()
-		image := opts.nodePodImage()
-
-		// Pre-pull check: validate the image on a target node before creating
-		// any RBAC. A bad or unreachable image then fails fast with the real
-		// reason instead of leaving the fleet stuck in ImagePullBackOff.
-		fmt.Fprintf(stderr, "node-agent: verifying image %q is pullable on node %q\n", image, work[0].node)
-		if pullErr := verifyImagePullable(ctx, cs, namespace, image, work[0].node, runID); pullErr != nil {
-			fmt.Fprintf(stderr, "node-agent: image check failed (%v); skipping node-agent components\n", pullErr)
-			for name := range wanted {
-				if covered[name] {
-					results[name] = append(results[name], Instance{
-						Name:  "(image pull failed)",
-						Pages: []Page{{Name: "-", Error: fmt.Sprintf("node-agent image %q could not be pulled: %v", image, pullErr)}},
-					})
-				}
-			}
-			return assembleLocalResults(results), nil
-		}
-
-		ra := &rbacAgent{cs: cs, namespace: namespace, runID: runID, image: image}
-
-		if err := ra.setup(ctx); err != nil {
-			return nil, fmt.Errorf("setting up node-agent RBAC: %w", err)
-		}
-		// Always tear down, even on cancellation: use a fresh context so the
-		// cleanup itself is not aborted by the caller's cancelled ctx.
-		defer func() {
-			cleanupCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			defer cancel()
-			ra.teardown(cleanupCtx)
-		}()
-
-		fmt.Fprintf(stderr, "node-agent: created serviceaccount/%s and clusterrolebinding (-> %s); launching %d pod(s)\n",
-			ra.name(), monitoringClusterRole, len(work))
-
-		// Launch every pod, then collect. Pods are independent so we start them
-		// all before waiting.
-		podToNode := map[string]nodeWork{}
-		for _, w := range work {
-			podName, err := ra.launchPod(ctx, w.node, buildScript(w.specs, curlTimeout))
-			if err != nil {
-				// Record the failure against each component on this node.
-				for _, lc := range distinctComponents(w.specs) {
-					results[lc] = append(results[lc], Instance{
-						Name:  w.node,
-						Pages: []Page{{Name: "-", Error: fmt.Sprintf("launching pod: %v", err)}},
-					})
-				}
-				continue
-			}
-			podToNode[podName] = w
-		}
-
-		for podName, w := range podToNode {
-			raw, err := ra.collect(ctx, podName, 2*time.Minute)
-			if err != nil {
-				for _, lc := range distinctComponents(w.specs) {
-					results[lc] = append(results[lc], Instance{
-						Name:  w.node,
-						Pages: []Page{{Name: "-", Error: fmt.Sprintf("collecting pod output: %v", err)}},
-					})
-				}
-				continue
-			}
-			for comp, pagesForComp := range parseAgentLog(raw) {
-				results[comp] = append(results[comp], Instance{Name: w.node, Pages: pagesForComp})
-			}
+		if err := runNodeAgents(ctx, cs, namespace, work, covered, opts, results); err != nil {
+			return nil, err
 		}
 	}
 
 	return assembleLocalResults(results), nil
 }
 
+// wantedLocalComponents returns the loopback components the caller asked for.
+func wantedLocalComponents(requested []string) map[string]localComponent {
+	wanted := map[string]localComponent{}
+
+	for _, lc := range localComponents {
+		if slices.Contains(requested, lc.name) {
+			wanted[lc.name] = lc
+		}
+	}
+
+	return wanted
+}
+
+// buildNodeWork produces the per-node fetch list and reports which components
+// ended up with at least one eligible node.
+func buildNodeWork(nodes []corev1.Node, wanted map[string]localComponent, pages []string) (work []nodeWork, covered map[string]bool) {
+	covered = map[string]bool{}
+
+	for _, node := range nodes {
+		specs := nodeFetchSpecs(node, wanted, pages, covered)
+		if len(specs) > 0 {
+			work = append(work, nodeWork{node: node.Name, specs: specs})
+		}
+	}
+
+	return work, covered
+}
+
+// nodeFetchSpecs builds the endpoints to fetch from one node, marking the
+// covered set as a side effect.
+func nodeFetchSpecs(node corev1.Node, wanted map[string]localComponent, pages []string, covered map[string]bool) []fetchSpec {
+	controlPlane := isControlPlane(node)
+
+	var specs []fetchSpec
+
+	for _, lc := range wanted {
+		if lc.controlPlaneOnly && !controlPlane {
+			continue
+		}
+
+		for _, page := range filterPages(lc.pages, pages) {
+			specs = append(specs, fetchSpec{
+				component: lc.name,
+				page:      page,
+				url:       fmt.Sprintf("%s://127.0.0.1:%d/%s", lc.scheme, lc.port, page),
+			})
+			covered[lc.name] = true
+		}
+	}
+
+	return specs
+}
+
+// runNodeAgents performs the pre-pull check, sets up (and always tears down)
+// the temporary RBAC, and launches/collects an agent pod per node.
+func runNodeAgents(ctx context.Context, cs kubernetes.Interface, namespace string, work []nodeWork, covered map[string]bool, opts Options, results map[string][]Instance) error {
+	runID := opts.runID()
+	image := opts.nodePodImage()
+
+	// Pre-pull check: validate the image on a target node before creating any
+	// RBAC, so a bad or unreachable image fails fast with the real reason
+	// instead of leaving the fleet stuck in ImagePullBackOff.
+	fmt.Fprintf(stderr, "node-agent: verifying image %q is pullable on node %q\n", image, work[0].node)
+
+	if pullErr := verifyImagePullable(ctx, cs, namespace, image, work[0].node, runID); pullErr != nil {
+		fmt.Fprintf(stderr, "node-agent: image check failed (%v); skipping node-agent components\n", pullErr)
+		msg := fmt.Sprintf("node-agent image %q could not be pulled: %v", image, pullErr)
+
+		for name := range covered { // covered holds only components with eligible nodes
+			results[name] = append(results[name], placeholderInstance("(image pull failed)", msg))
+		}
+
+		return nil
+	}
+
+	ra := &rbacAgent{cs: cs, namespace: namespace, runID: runID, image: image}
+	if err := ra.setup(ctx); err != nil {
+		return fmt.Errorf("setting up node-agent RBAC: %w", err)
+	}
+	// Always tear down, even on cancellation: a fresh context keeps the cleanup
+	// from being aborted by the caller's cancelled ctx.
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		ra.teardown(cleanupCtx)
+	}()
+
+	fmt.Fprintf(stderr, "node-agent: created serviceaccount/%s and clusterrolebinding (-> %s); launching %d pod(s)\n",
+		ra.name(), monitoringClusterRole, len(work))
+
+	ra.launchAndCollect(ctx, work, curlTimeoutSeconds(opts.Timeout), results)
+
+	return nil
+}
+
+// launchAndCollect starts every agent pod, then gathers each pod's output.
+func (r *rbacAgent) launchAndCollect(ctx context.Context, work []nodeWork, curlTimeout int, results map[string][]Instance) {
+	podToNode := map[string]nodeWork{}
+
+	for _, w := range work {
+		podName, err := r.launchPod(ctx, w.node, buildScript(w.specs, curlTimeout))
+		if err != nil {
+			recordNodeError(results, w, fmt.Sprintf("launching pod: %v", err))
+			continue
+		}
+
+		podToNode[podName] = w
+	}
+
+	for podName, w := range podToNode {
+		raw, err := r.collect(ctx, podName, 2*time.Minute)
+		if err != nil {
+			recordNodeError(results, w, fmt.Sprintf("collecting pod output: %v", err))
+			continue
+		}
+
+		for comp, pagesForComp := range parseAgentLog(raw) {
+			results[comp] = append(results[comp], Instance{Name: w.node, Pages: pagesForComp})
+		}
+	}
+}
+
+// placeholderInstance builds a synthetic instance carrying a single error,
+// used when no real instance output is available.
+func placeholderInstance(name, errMsg string) Instance {
+	return Instance{Name: name, Pages: []Page{{Name: "-", Error: errMsg}}}
+}
+
+// recordNodeError attributes an error to every component targeted on a node.
+func recordNodeError(results map[string][]Instance, w nodeWork, errMsg string) {
+	for _, comp := range distinctComponents(w.specs) {
+		results[comp] = append(results[comp], placeholderInstance(w.node, errMsg))
+	}
+}
+
+// curlTimeoutSeconds converts the per-page timeout to whole seconds for curl,
+// falling back to a sane default.
+func curlTimeoutSeconds(d time.Duration) int {
+	if s := int(d.Seconds()); s > 0 {
+		return s
+	}
+
+	return 10
+}
+
 // assembleLocalResults flattens the per-component instance map into Components
 // in canonical display order.
 func assembleLocalResults(results map[string][]Instance) []Component {
 	var out []Component
+
 	for _, lc := range localComponents {
 		if insts, ok := results[lc.name]; ok {
 			sortInstances(insts)
 			out = append(out, Component{Name: lc.name, Instances: insts})
 		}
 	}
+
 	return out
 }
 
@@ -229,18 +277,22 @@ func isControlPlane(node corev1.Node) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
 func distinctComponents(specs []fetchSpec) []string {
 	seen := map[string]bool{}
+
 	var out []string
+
 	for _, s := range specs {
 		if !seen[s.component] {
 			seen[s.component] = true
 			out = append(out, s.component)
 		}
 	}
+
 	return out
 }
 
@@ -251,6 +303,7 @@ func buildScript(specs []fetchSpec, curlTimeoutSec int) string {
 	var b strings.Builder
 	b.WriteString("set -u\n")
 	fmt.Fprintf(&b, "TOKEN=$(cat %s 2>/dev/null || echo '')\n", agentTokenPath)
+
 	for _, s := range specs {
 		fmt.Fprintf(&b, "echo '%s%s %s %s'\n", markerStart, s.component, s.page, s.url)
 		fmt.Fprintf(&b, "code=$(curl -sk --max-time %d -o /tmp/body -w '%%{http_code}' -H \"Authorization: Bearer $TOKEN\" '%s' 2>/tmp/err)\n", curlTimeoutSec, s.url)
@@ -261,6 +314,7 @@ func buildScript(specs []fetchSpec, curlTimeoutSec int) string {
 		b.WriteString("base64 /tmp/err 2>/dev/null\n")
 		fmt.Fprintf(&b, "echo '%s'\n", markerEnd)
 	}
+
 	return b.String()
 }
 
@@ -273,14 +327,18 @@ func parseAgentLog(raw []byte) map[string][]Page {
 		if !strings.HasPrefix(lines[i], markerStart) {
 			continue
 		}
+
 		fields := strings.SplitN(strings.TrimPrefix(lines[i], markerStart), " ", 3)
 		if len(fields) != 3 {
 			continue
 		}
+
 		comp, pageName, url := fields[0], fields[1], fields[2]
 
 		var code, bodyB64, errB64 string
+
 		section := ""
+
 		for i++; i < len(lines); i++ {
 			line := lines[i]
 			switch {
@@ -293,12 +351,14 @@ func parseAgentLog(raw []byte) map[string][]Page {
 			case line == markerEnd:
 				section = ""
 			default:
-				if section == "body" {
+				switch section {
+				case "body":
 					bodyB64 += line
-				} else if section == "err" {
+				case "err":
 					errB64 += line
 				}
 			}
+
 			if line == markerEnd {
 				break
 			}
@@ -306,6 +366,7 @@ func parseAgentLog(raw []byte) map[string][]Page {
 
 		out[comp] = append(out[comp], buildAgentPage(pageName, url, code, bodyB64, errB64))
 	}
+
 	return out
 }
 
@@ -314,10 +375,10 @@ func buildAgentPage(name, url, code, bodyB64, errB64 string) Page {
 	body := decodeAgentField(bodyB64)
 	stderr := strings.TrimSpace(decodeAgentField(errB64))
 
-	switch {
-	case code == "200":
+	switch code {
+	case "200":
 		p.Content = body
-	case code == "000" || code == "":
+	case "000", "":
 		// curl never received a response (connection refused, timeout, ...).
 		if stderr != "" {
 			p.Error = stderr
@@ -329,8 +390,10 @@ func buildAgentPage(name, url, code, bodyB64, errB64 string) Page {
 		if detail == "" {
 			detail = stderr
 		}
+
 		p.Error = fmt.Sprintf("HTTP %s: %s", code, detail)
 	}
+
 	return p
 }
 
@@ -340,15 +403,18 @@ func decodeAgentField(s string) string {
 		if r == '\n' || r == '\r' || r == ' ' || r == '\t' {
 			return -1
 		}
+
 		return r
 	}, s)
 	if cleaned == "" {
 		return ""
 	}
+
 	decoded, err := base64.StdEncoding.DecodeString(cleaned)
 	if err != nil {
 		return ""
 	}
+
 	return string(decoded)
 }
 
@@ -389,6 +455,7 @@ func (r *rbacAgent) setup(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("creating clusterrolebinding: %w", err)
 	}
+
 	return nil
 }
 
@@ -400,6 +467,7 @@ func (r *rbacAgent) teardown(ctx context.Context) {
 	if err := r.cs.RbacV1().ClusterRoleBindings().Delete(ctx, r.name(), metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 		fmt.Fprintf(stderr, "node-agent: warning: failed to delete clusterrolebinding %s: %v\n", r.name(), err)
 	}
+
 	if err := r.cs.CoreV1().ServiceAccounts(r.namespace).Delete(ctx, r.name(), metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 		fmt.Fprintf(stderr, "node-agent: warning: failed to delete serviceaccount %s: %v\n", r.name(), err)
 	}
@@ -407,6 +475,7 @@ func (r *rbacAgent) teardown(ctx context.Context) {
 
 func (r *rbacAgent) launchPod(ctx context.Context, nodeName, script string) (string, error) {
 	podName := r.name() + "-" + sanitizeName(nodeName)
+
 	_, err := r.cs.CoreV1().Pods(r.namespace).Create(ctx, &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: podName, Namespace: r.namespace, Labels: r.labels()},
 		Spec: corev1.PodSpec{
@@ -426,6 +495,7 @@ func (r *rbacAgent) launchPod(ctx context.Context, nodeName, script string) (str
 	if err != nil {
 		return "", err
 	}
+
 	return podName, nil
 }
 
@@ -435,18 +505,21 @@ func (r *rbacAgent) launchPod(ctx context.Context, nodeName, script string) (str
 func (r *rbacAgent) collect(ctx context.Context, podName string, timeout time.Duration) ([]byte, error) {
 	waitCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+
 	for {
 		pod, err := r.cs.CoreV1().Pods(r.namespace).Get(waitCtx, podName, metav1.GetOptions{})
 		if err != nil {
 			return nil, err
 		}
-		switch pod.Status.Phase {
-		case corev1.PodSucceeded, corev1.PodFailed:
+
+		if pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
 			return r.cs.CoreV1().Pods(r.namespace).GetLogs(podName, &corev1.PodLogOptions{}).DoRaw(ctx)
 		}
+
 		if reason, msg, failed := imagePullFailure(pod); failed {
 			return nil, fmt.Errorf("image %q pull failed: %s: %s", r.image, reason, msg)
 		}
+
 		select {
 		case <-waitCtx.Done():
 			return nil, fmt.Errorf("timed out waiting for pod %s", podName)
@@ -473,6 +546,7 @@ func imagePullFailure(pod *corev1.Pod) (reason, msg string, failed bool) {
 			return w.Reason, strings.TrimSpace(w.Message), true
 		}
 	}
+
 	return "", "", false
 }
 
@@ -482,6 +556,7 @@ func imagePullFailure(pod *corev1.Pod) (reason, msg string, failed bool) {
 // is always deleted before returning.
 func verifyImagePullable(ctx context.Context, cs kubernetes.Interface, namespace, image, nodeName, runID string) error {
 	name := "zeedumper-zpages-" + runID + "-imgcheck"
+
 	probe := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -502,14 +577,17 @@ func verifyImagePullable(ctx context.Context, cs kubernetes.Interface, namespace
 	if _, err := cs.CoreV1().Pods(namespace).Create(ctx, probe, metav1.CreateOptions{}); err != nil {
 		return fmt.Errorf("creating image-check pod: %w", err)
 	}
+
 	defer func() {
 		delCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
+
 		_ = cs.CoreV1().Pods(namespace).Delete(delCtx, name, metav1.DeleteOptions{})
 	}()
 
 	waitCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
+
 	for {
 		pod, err := cs.CoreV1().Pods(namespace).Get(waitCtx, name, metav1.GetOptions{})
 		if err != nil {
@@ -519,14 +597,17 @@ func verifyImagePullable(ctx context.Context, cs kubernetes.Interface, namespace
 		if pod.Status.Phase == corev1.PodRunning || pod.Status.Phase == corev1.PodSucceeded {
 			return nil
 		}
+
 		for _, st := range pod.Status.ContainerStatuses {
 			if st.State.Running != nil || st.State.Terminated != nil {
 				return nil
 			}
 		}
+
 		if reason, msg, failed := imagePullFailure(pod); failed {
 			return fmt.Errorf("%s: %s", reason, msg)
 		}
+
 		select {
 		case <-waitCtx.Done():
 			return fmt.Errorf("timed out after 90s waiting to pull image (last phase: %s)", pod.Status.Phase)
@@ -537,6 +618,7 @@ func verifyImagePullable(ctx context.Context, cs kubernetes.Interface, namespace
 
 func sanitizeName(s string) string {
 	var b strings.Builder
+
 	for _, r := range strings.ToLower(s) {
 		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
 			b.WriteRune(r)
@@ -544,9 +626,11 @@ func sanitizeName(s string) string {
 			b.WriteRune('-')
 		}
 	}
+
 	out := b.String()
 	if len(out) > 40 {
 		out = out[:40]
 	}
+
 	return strings.Trim(out, "-")
 }

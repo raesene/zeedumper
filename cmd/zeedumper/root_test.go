@@ -8,6 +8,7 @@ import (
 
 func TestVersionCommand(t *testing.T) {
 	cmd := newRootCmd()
+
 	var out bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&out)
@@ -16,6 +17,7 @@ func TestVersionCommand(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("version command failed: %v", err)
 	}
+
 	if !strings.Contains(out.String(), "zeedumper") {
 		t.Errorf("version output = %q", out.String())
 	}

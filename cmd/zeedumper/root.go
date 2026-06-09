@@ -60,6 +60,7 @@ rather than failing the whole run.`,
 	flags.String("node-pod-image", "curlimages/curl:latest", "container image used for temporary node-agent pods")
 
 	cmd.AddCommand(newVersionCmd())
+
 	return cmd
 }
 
@@ -72,6 +73,7 @@ func initConfig(cmd *cobra.Command) error {
 	v.AutomaticEnv()
 
 	var bindErr error
+
 	cmd.Flags().VisitAll(func(f *pflag.Flag) {
 		if err := v.BindPFlag(f.Name, f); err != nil {
 			bindErr = err
@@ -84,6 +86,7 @@ func initConfig(cmd *cobra.Command) error {
 			}
 		}
 	})
+
 	return bindErr
 }
 
@@ -127,23 +130,27 @@ func runDump(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	w := cmd.OutOrStdout()
-	if outputFile != "" {
-		f, err := os.Create(outputFile)
-		if err != nil {
-			return fmt.Errorf("creating output file: %w", err)
-		}
-		defer f.Close()
-		w = f
+	if outputFile == "" {
+		return output.Render(cmd.OutOrStdout(), dump, format)
 	}
 
-	if err := output.Render(w, dump, format); err != nil {
-		return err
+	f, err := os.Create(outputFile) //nolint:gosec // G304: the output path is a user-supplied CLI flag by design.
+	if err != nil {
+		return fmt.Errorf("creating output file: %w", err)
 	}
 
-	if outputFile != "" {
-		fmt.Fprintf(cmd.ErrOrStderr(), "wrote %s output to %s\n", format, outputFile)
+	if rerr := output.Render(f, dump, format); rerr != nil {
+		_ = f.Close()
+
+		return rerr
 	}
+
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("closing output file: %w", err)
+	}
+
+	fmt.Fprintf(cmd.ErrOrStderr(), "wrote %s output to %s\n", format, outputFile)
+
 	return nil
 }
 

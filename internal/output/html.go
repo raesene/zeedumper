@@ -50,6 +50,7 @@ func buildView(d *dumper.Dump) htmlView {
 		cv := componentView{Name: comp.Name}
 		for _, inst := range comp.Instances {
 			instAnchor := sanitizeAnchor(comp.Name + "--" + inst.Name)
+
 			iv := instanceView{Name: inst.Name, Anchor: instAnchor}
 			for _, page := range inst.Pages {
 				iv.Pages = append(iv.Pages, pageView{
@@ -61,10 +62,13 @@ func buildView(d *dumper.Dump) htmlView {
 					OK:      page.OK(),
 				})
 			}
+
 			cv.Instances = append(cv.Instances, iv)
 		}
+
 		v.Components = append(v.Components, cv)
 	}
+
 	return v
 }
 
@@ -72,6 +76,7 @@ func renderHTML(w io.Writer, d *dumper.Dump) error {
 	if err := htmlTemplate.Execute(w, buildView(d)); err != nil {
 		return fmt.Errorf("rendering html: %w", err)
 	}
+
 	return nil
 }
 

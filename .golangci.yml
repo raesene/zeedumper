@@ -1,0 +1,111 @@
+version: "2"
+run:
+  concurrency: 4
+  timeout: 5m
+  tests: true
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 50
+
+linters:
+  enable:
+    # correctness
+    - govet
+    - staticcheck
+    - unused
+    - errcheck
+    - errorlint
+    - nilerr
+    - forcetypeassert
+    - copyloopvar
+    - durationcheck
+    - reassign
+    # style
+    - gocritic
+    - revive
+    - wsl_v5
+    - whitespace
+    - godot
+    - misspell
+    - dupword
+    - predeclared
+    - errname
+    - asciicheck
+    # complexity
+    - gocyclo
+    - nestif
+    - funlen
+    - dupl
+    # performance
+    - perfsprint
+    - unconvert
+    - ineffassign
+    - goconst
+    # security & resources
+    - gosec
+    - bidichk
+    - bodyclose
+    - noctx
+    - containedctx
+    - fatcontext
+    # testing
+    - testifylint
+    - thelper
+    - usetesting
+    # modernization & meta
+    - modernize
+    - exptostd
+    - intrange
+    - usestdlibvars
+    - exhaustive
+    - nolintlint
+
+  disable:
+    - lll
+    - prealloc
+    - wrapcheck
+    - err113
+    - mnd
+    - paralleltest
+
+  exclusions:
+    paths:
+      - vendor$
+      - third_party$
+
+  settings:
+    dupl:
+      threshold: 100
+    errcheck:
+      check-type-assertions: true
+      # Writes to stdout/stderr carry no actionable error in a CLI.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+    funlen:
+      lines: 120
+      statements: 80
+    goconst:
+      min-len: 3
+      min-occurrences: 4
+    gocyclo:
+      min-complexity: 13
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+    wsl_v5:
+      allow-first-in-block: true
+      allow-whole-block: false
+      branch-max-lines: 2
+
+formatters:
+  enable:
+    - gofmt
+    - gofumpt
+  settings:
+    gofumpt:
+      extra-rules: true
+  exclusions:
+    generated: lax

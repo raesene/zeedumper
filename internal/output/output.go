@@ -13,6 +13,7 @@ import (
 // Format is a supported output format.
 type Format string
 
+// Supported output formats.
 const (
 	FormatText Format = "text"
 	FormatJSON Format = "json"
@@ -50,6 +51,7 @@ func Render(w io.Writer, d *dumper.Dump, format Format) error {
 func renderJSON(w io.Writer, d *dumper.Dump) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
+
 	return enc.Encode(d)
 }
 
@@ -57,17 +59,21 @@ func renderText(w io.Writer, d *dumper.Dump) error {
 	bw := &errWriter{w: w}
 	bw.printf("zeedumper: Kubernetes z-page dump\n")
 	bw.printf("Cluster:   %s\n", d.Cluster)
+
 	if d.Context != "" {
 		bw.printf("Context:   %s\n", d.Context)
 	}
+
 	bw.printf("Timestamp: %s\n", d.Timestamp)
 
 	for _, comp := range d.Components {
 		bw.printf("\n================================================================\n")
 		bw.printf("COMPONENT: %s\n", comp.Name)
 		bw.printf("================================================================\n")
+
 		for _, inst := range comp.Instances {
 			bw.printf("\n--- instance: %s ---\n", inst.Name)
+
 			for _, page := range inst.Pages {
 				if page.OK() {
 					bw.printf("\n[%s] %s\n", page.Name, page.Path)
@@ -78,6 +84,7 @@ func renderText(w io.Writer, d *dumper.Dump) error {
 			}
 		}
 	}
+
 	return bw.err
 }
 
@@ -91,5 +98,6 @@ func (e *errWriter) printf(format string, args ...any) {
 	if e.err != nil {
 		return
 	}
+
 	_, e.err = fmt.Fprintf(e.w, format, args...)
 }

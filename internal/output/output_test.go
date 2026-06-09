@@ -33,6 +33,7 @@ func TestParseFormat(t *testing.T) {
 			t.Errorf("ParseFormat(%q) unexpected error: %v", in, err)
 		}
 	}
+
 	if _, err := ParseFormat("yaml"); err == nil {
 		t.Error("ParseFormat(yaml) should error")
 	}
@@ -43,10 +44,12 @@ func TestRenderJSONRoundTrips(t *testing.T) {
 	if err := Render(&buf, sampleDump(), FormatJSON); err != nil {
 		t.Fatal(err)
 	}
+
 	var got dumper.Dump
 	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
 		t.Fatalf("output is not valid JSON: %v", err)
 	}
+
 	if got.Components[0].Instances[0].Pages[1].Error != "forbidden" {
 		t.Errorf("error field lost in round trip: %+v", got)
 	}
@@ -57,6 +60,7 @@ func TestRenderTextIncludesContentAndErrors(t *testing.T) {
 	if err := Render(&buf, sampleDump(), FormatText); err != nil {
 		t.Fatal(err)
 	}
+
 	out := buf.String()
 	for _, want := range []string{"kube-apiserver", "v=1", "ERROR: forbidden"} {
 		if !strings.Contains(out, want) {
@@ -68,14 +72,17 @@ func TestRenderTextIncludesContentAndErrors(t *testing.T) {
 func TestRenderHTMLEscapesAndAnchors(t *testing.T) {
 	d := sampleDump()
 	d.Components[0].Instances[0].Pages[0].Content = "<script>x</script>"
+
 	var buf bytes.Buffer
 	if err := Render(&buf, d, FormatHTML); err != nil {
 		t.Fatal(err)
 	}
+
 	out := buf.String()
 	if strings.Contains(out, "<script>x</script>") {
 		t.Error("html output did not escape page content")
 	}
+
 	if !strings.Contains(out, `id="kube-apiserver--apiserver"`) {
 		t.Error("html output missing instance anchor")
 	}

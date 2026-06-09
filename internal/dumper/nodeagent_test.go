@@ -18,6 +18,7 @@ func agentBlock(comp, page, url, code, body, stderr string) string {
 	b.WriteString(markerErr + "\n")
 	b.WriteString(base64.StdEncoding.EncodeToString([]byte(stderr)) + "\n")
 	b.WriteString(markerEnd + "\n")
+
 	return b.String()
 }
 
@@ -49,6 +50,7 @@ func TestBuildScriptCoversEveryEndpoint(t *testing.T) {
 		{component: "kube-scheduler", page: "flagz", url: "https://127.0.0.1:10259/flagz"},
 		{component: "kube-proxy", page: "statusz", url: "http://127.0.0.1:10249/statusz"},
 	}
+
 	script := buildScript(specs, 10)
 	for _, want := range []string{"10259/flagz", "10249/statusz", "--max-time 10", "Authorization: Bearer"} {
 		if !strings.Contains(script, want) {
