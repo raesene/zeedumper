@@ -61,13 +61,45 @@ Beyond the proxy permissions, the node-agent strategy additionally requires
 
 ## Install
 
+### go install
+
+Requires Go 1.26 or newer.
+
 ```sh
+# Latest tagged release
 go install github.com/raesene/zeedumper/cmd/zeedumper@latest
+
+# A specific version
+go install github.com/raesene/zeedumper/cmd/zeedumper@v0.1.0
 ```
 
-Or build from source:
+This installs the `zeedumper` binary into `$(go env GOPATH)/bin` (or `$GOBIN`
+if set). Make sure that directory is on your `PATH`:
 
 ```sh
+export PATH="$(go env GOPATH)/bin:$PATH"
+```
+
+> Builds installed this way report `version` as `dev` — the release version is
+> only stamped into the prebuilt binaries below (via GoReleaser ldflags).
+
+### Prebuilt binaries
+
+Download a prebuilt archive for your platform from the
+[releases page](https://github.com/raesene/zeedumper/releases) (linux, macOS,
+and Windows on amd64/arm64), then verify and extract:
+
+```sh
+sha256sum -c checksums.txt        # optional integrity check
+tar xzf zeedumper_*_linux_amd64.tar.gz
+./zeedumper version
+```
+
+### Build from source
+
+```sh
+git clone https://github.com/raesene/zeedumper
+cd zeedumper
 go build -o zeedumper ./cmd/zeedumper
 ```
 
