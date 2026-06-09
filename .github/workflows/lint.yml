@@ -30,4 +30,8 @@ jobs:
           # Pinned for reproducible CI (matches the version used locally).
           # Bump deliberately rather than tracking "latest".
           version: v2.6.2
+          # Build from source with the runner's Go toolchain. The prebuilt
+          # v2.6.2 binary is built with Go 1.25 and refuses a go.mod that
+          # targets 1.26; go install compiles it with the runner's Go 1.26+.
+          install-mode: goinstall
           args: --timeout 5m
