@@ -192,17 +192,122 @@ func renderConfigzHTML(pageName, raw string) template.HTML {
 		return ""
 	}
 
-	pretty, err := json.MarshalIndent(obj, "", "  ")
-	if err != nil {
-		return ""
-	}
-
 	var b strings.Builder
 	b.WriteString(`<div class="structured">`)
-	fmt.Fprintf(&b, `<pre class="json">%s</pre>`, template.HTMLEscapeString(string(pretty)))
+
+	keys := make([]string, 0, len(obj))
+	for k := range obj {
+		keys = append(keys, k)
+	}
+
+	sort.Strings(keys)
+
+	for _, section := range keys {
+		fmt.Fprintf(&b, `<h4 class="config-section">%s</h4>`, template.HTMLEscapeString(section))
+
+		var val interface{}
+		if err := json.Unmarshal(obj[section], &val); err != nil {
+			continue
+		}
+
+		renderConfigValue(&b, val, 0)
+	}
+
 	b.WriteString(`</div>`)
 
 	return template.HTML(b.String())
+}
+
+// renderConfigValue recursively renders a JSON value as nested config tables.
+func renderConfigValue(b *strings.Builder, val interface{}, depth int) {
+	switch v := val.(type) {
+	case map[string]interface{}:
+		b.WriteString(`<table class="config-table"><tbody>`)
+
+		keys := make([]string, 0, len(v))
+		for k := range v {
+			keys = append(keys, k)
+		}
+
+		sort.Strings(keys)
+
+		for _, k := range keys {
+			child := v[k]
+			if isScalar(child) {
+				fmt.Fprintf(b, `<tr><td class="flag-name">%s</td><td class="flag-value">%s</td></tr>`,
+					template.HTMLEscapeString(k), template.HTMLEscapeString(formatScalar(child)))
+			} else {
+				fmt.Fprintf(b, `<tr><td colspan="2"><details%s><summary class="flag-name">%s</summary>`,
+					openAttr(depth), template.HTMLEscapeString(k))
+				renderConfigValue(b, child, depth+1)
+				b.WriteString(`</details></td></tr>`)
+			}
+		}
+
+		b.WriteString(`</tbody></table>`)
+
+	case []interface{}:
+		if len(v) == 0 {
+			b.WriteString(`<span class="flag-value">(empty)</span>`)
+			return
+		}
+
+		if allScalar(v) {
+			b.WriteString(`<ul class="config-list">`)
+
+			for _, item := range v {
+				fmt.Fprintf(b, `<li class="flag-value">%s</li>`, template.HTMLEscapeString(formatScalar(item)))
+			}
+
+			b.WriteString(`</ul>`)
+		} else {
+			for i, item := range v {
+				fmt.Fprintf(b, `<div class="config-array-item"><span class="flag-name">[%d]</span>`, i)
+				renderConfigValue(b, item, depth+1)
+				b.WriteString(`</div>`)
+			}
+		}
+
+	default:
+		fmt.Fprintf(b, `<span class="flag-value">%s</span>`, template.HTMLEscapeString(formatScalar(val)))
+	}
+}
+
+func isScalar(v interface{}) bool {
+	switch v.(type) {
+	case map[string]interface{}, []interface{}:
+		return false
+	default:
+		return true
+	}
+}
+
+func allScalar(items []interface{}) bool {
+	for _, item := range items {
+		if !isScalar(item) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func formatScalar(v interface{}) string {
+	if v == nil {
+		return "null"
+	}
+
+	return fmt.Sprintf("%v", v)
+}
+
+// openAttr returns an " open" attribute for the first two nesting levels so the
+// top of the config tree is expanded by default.
+func openAttr(depth int) string {
+	if depth < 2 {
+		return " open"
+	}
+
+	return ""
 }
 
 func formatUptime(seconds int64) string {
@@ -332,6 +437,14 @@ var htmlTemplate = template.Must(template.New("dump").Parse(`<!DOCTYPE html>
   details { margin-top: .75rem; }
   details summary { cursor: pointer; font-size: .85rem; font-weight: 600; }
   .path-list { font-family: monospace; font-size: .85rem; columns: 2; }
+  .config-section { margin: .75rem 0 .25rem; }
+  .config-table { border-collapse: collapse; width: 100%; font-size: .9rem; }
+  .config-table td { padding: .3rem .75rem; border-bottom: 1px solid #8882; }
+  .config-table tbody tr:nth-child(even) { background: #00000008; }
+  .config-table details { margin: .25rem 0; }
+  .config-table details summary { cursor: pointer; }
+  .config-list { font-family: monospace; font-size: .85rem; margin: .25rem 0; padding-left: 1.5rem; }
+  .config-array-item { margin: .25rem 0 .25rem .75rem; }
   .error { background: #c0392b18; border-left: 3px solid #c0392b; padding: .75rem 1rem;
            border-radius: 4px; font-family: monospace; font-size: .85rem; white-space: pre-wrap; }
   .badge { font-size: .7rem; padding: .1rem .4rem; border-radius: 4px;
