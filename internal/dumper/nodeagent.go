@@ -306,7 +306,13 @@ func buildScript(specs []fetchSpec, curlTimeoutSec int) string {
 
 	for _, s := range specs {
 		fmt.Fprintf(&b, "echo '%s%s %s %s'\n", markerStart, s.component, s.page, s.url)
-		fmt.Fprintf(&b, "code=$(curl -sk --max-time %d -o /tmp/body -w '%%{http_code}' -H \"Authorization: Bearer $TOKEN\" '%s' 2>/tmp/err)\n", curlTimeoutSec, s.url)
+
+		acceptHeader := ""
+		if accept, ok := structuredAccept[s.page]; ok {
+			acceptHeader = fmt.Sprintf(" -H 'Accept: %s'", accept)
+		}
+
+		fmt.Fprintf(&b, "code=$(curl -sk --max-time %d -o /tmp/body -w '%%{http_code}' -H \"Authorization: Bearer $TOKEN\"%s '%s' 2>/tmp/err)\n", curlTimeoutSec, acceptHeader, s.url)
 		fmt.Fprintf(&b, "echo \"%s$code\"\n", markerCode)
 		fmt.Fprintf(&b, "echo '%s'\n", markerBody)
 		b.WriteString("base64 /tmp/body 2>/dev/null\n")
