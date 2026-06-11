@@ -49,17 +49,22 @@ func formatContent(s string) (formatted string, isJSON bool) {
 	if len(trimmed) == 0 {
 		return s, false
 	}
+
 	if trimmed[0] != '{' && trimmed[0] != '[' {
 		return s, false
 	}
+
 	var raw json.RawMessage
+
 	if err := json.Unmarshal([]byte(trimmed), &raw); err != nil {
 		return s, false
 	}
+
 	pretty, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
 		return s, false
 	}
+
 	return string(pretty), true
 }
 
