@@ -28,7 +28,8 @@ retrieves component z-pages through the API server proxy.
 By default it dumps every supported component:
   kube-apiserver, kube-controller-manager, kube-scheduler, kube-proxy, kubelet
 
-Each exposes flagz and statusz; the kubelet additionally exposes configz.
+Each exposes flagz and statusz; the kubelet, kube-controller-manager,
+kube-scheduler, and kube-proxy additionally expose configz.
 Pages that are gated off or blocked by RBAC are reported as per-page errors
 rather than failing the whole run.`,
 		Example: `  # Dump everything as text

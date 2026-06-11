@@ -35,9 +35,9 @@ type localComponent struct {
 
 // localComponents is the set handled via the node-agent strategy.
 var localComponents = []localComponent{
-	{name: "kube-controller-manager", scheme: "https", port: 10257, pages: []string{"flagz", "statusz"}, controlPlaneOnly: true},
-	{name: "kube-scheduler", scheme: "https", port: 10259, pages: []string{"flagz", "statusz"}, controlPlaneOnly: true},
-	{name: "kube-proxy", scheme: "http", port: 10249, pages: []string{"flagz", "statusz"}, controlPlaneOnly: false},
+	{name: "kube-controller-manager", scheme: "https", port: 10257, pages: []string{"flagz", "statusz", "configz"}, controlPlaneOnly: true},
+	{name: "kube-scheduler", scheme: "https", port: 10259, pages: []string{"flagz", "statusz", "configz"}, controlPlaneOnly: true},
+	{name: "kube-proxy", scheme: "http", port: 10249, pages: []string{"flagz", "statusz", "configz"}, controlPlaneOnly: false},
 }
 
 const (

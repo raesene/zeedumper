@@ -50,16 +50,16 @@ var specs = map[string]componentSpec{
 		},
 	},
 	"kube-controller-manager": {
-		pages:    []string{"flagz", "statusz"},
-		discover: podProxyDiscoverer("component=kube-controller-manager", "https", 10257, []string{"flagz", "statusz"}),
+		pages:    []string{"flagz", "statusz", "configz"},
+		discover: podProxyDiscoverer("component=kube-controller-manager", "https", 10257, []string{"flagz", "statusz", "configz"}),
 	},
 	"kube-scheduler": {
-		pages:    []string{"flagz", "statusz"},
-		discover: podProxyDiscoverer("component=kube-scheduler", "https", 10259, []string{"flagz", "statusz"}),
+		pages:    []string{"flagz", "statusz", "configz"},
+		discover: podProxyDiscoverer("component=kube-scheduler", "https", 10259, []string{"flagz", "statusz", "configz"}),
 	},
 	"kube-proxy": {
-		pages:    []string{"flagz", "statusz"},
-		discover: podProxyDiscoverer("k8s-app=kube-proxy", "http", 10249, []string{"flagz", "statusz"}),
+		pages:    []string{"flagz", "statusz", "configz"},
+		discover: podProxyDiscoverer("k8s-app=kube-proxy", "http", 10249, []string{"flagz", "statusz", "configz"}),
 	},
 	"kubelet": {
 		pages:    []string{"flagz", "statusz", "configz"},

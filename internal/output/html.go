@@ -1,10 +1,12 @@
 package output
 
 import (
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"io"
 	"regexp"
+	"strings"
 
 	"github.com/raesene/zeedumper/internal/dumper"
 )
@@ -36,6 +38,29 @@ type pageView struct {
 	Error   string
 	Anchor  string
 	OK      bool
+	IsJSON  bool
+}
+
+// formatContent checks whether s is valid JSON and, if so, returns a
+// pretty-printed version. For non-JSON content the original string is returned
+// unchanged.
+func formatContent(s string) (formatted string, isJSON bool) {
+	trimmed := strings.TrimSpace(s)
+	if len(trimmed) == 0 {
+		return s, false
+	}
+	if trimmed[0] != '{' && trimmed[0] != '[' {
+		return s, false
+	}
+	var raw json.RawMessage
+	if err := json.Unmarshal([]byte(trimmed), &raw); err != nil {
+		return s, false
+	}
+	pretty, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return s, false
+	}
+	return string(pretty), true
 }
 
 var anchorUnsafe = regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
@@ -53,13 +78,15 @@ func buildView(d *dumper.Dump) htmlView {
 
 			iv := instanceView{Name: inst.Name, Anchor: instAnchor}
 			for _, page := range inst.Pages {
+				content, isJSON := formatContent(page.Content)
 				iv.Pages = append(iv.Pages, pageView{
 					Name:    page.Name,
 					Path:    page.Path,
-					Content: page.Content,
+					Content: content,
 					Error:   page.Error,
 					Anchor:  instAnchor + "--" + sanitizeAnchor(page.Name),
 					OK:      page.OK(),
+					IsJSON:  isJSON,
 				})
 			}
 
@@ -111,6 +138,7 @@ var htmlTemplate = template.Must(template.New("dump").Parse(`<!DOCTYPE html>
   .path { font-family: monospace; font-size: .8rem; opacity: .6; margin-bottom: .25rem; }
   pre { background: #00000010; padding: 1rem; border-radius: 6px;
         overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+  pre.json { white-space: pre; tab-size: 2; font-size: .85rem; line-height: 1.5; }
   .error { background: #c0392b18; border-left: 3px solid #c0392b; padding: .75rem 1rem;
            border-radius: 4px; font-family: monospace; font-size: .85rem; white-space: pre-wrap; }
   .badge { font-size: .7rem; padding: .1rem .4rem; border-radius: 4px;
@@ -151,7 +179,7 @@ var htmlTemplate = template.Must(template.New("dump").Parse(`<!DOCTYPE html>
             </h3>
             <div class="path">{{.Path}}</div>
             {{if .OK}}
-              <pre>{{.Content}}</pre>
+              <pre{{if .IsJSON}} class="json"{{end}}>{{.Content}}</pre>
             {{else}}
               <div class="error">{{.Error}}</div>
             {{end}}
