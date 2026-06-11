@@ -52,7 +52,11 @@ func TestBuildScriptCoversEveryEndpoint(t *testing.T) {
 	}
 
 	script := buildScript(specs, 10)
-	for _, want := range []string{"10259/flagz", "10249/statusz", "--max-time 10", "Authorization: Bearer", "as=Flagz", "as=Statusz"} {
+	for _, want := range []string{
+		"10259/flagz", "10249/statusz", "--max-time 10", "Authorization: Bearer",
+		"v=v1beta1;g=config.k8s.io;as=Flagz", "v=v1alpha1;g=config.k8s.io;as=Flagz",
+		"v=v1beta1;g=config.k8s.io;as=Statusz", "v=v1alpha1;g=config.k8s.io;as=Statusz",
+	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("script missing %q", want)
 		}

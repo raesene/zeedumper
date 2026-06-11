@@ -307,12 +307,24 @@ func buildScript(specs []fetchSpec, curlTimeoutSec int) string {
 	for _, s := range specs {
 		fmt.Fprintf(&b, "echo '%s%s %s %s'\n", markerStart, s.component, s.page, s.url)
 
-		acceptHeader := ""
-		if accept, ok := structuredAccept[s.page]; ok {
-			acceptHeader = fmt.Sprintf(" -H 'Accept: %s'", accept)
+		if versions, ok := structuredAccept[s.page]; ok {
+			// Try each structured version; use the first that doesn't 406.
+			fmt.Fprintf(&b, "code='406'\n")
+
+			for _, accept := range versions {
+				fmt.Fprintf(&b, "if [ \"$code\" = '406' ]; then\n")
+				fmt.Fprintf(&b, "  code=$(curl -sk --max-time %d -o /tmp/body -w '%%{http_code}' -H \"Authorization: Bearer $TOKEN\" -H 'Accept: %s' '%s' 2>/tmp/err)\n", curlTimeoutSec, accept, s.url)
+				fmt.Fprintf(&b, "fi\n")
+			}
+
+			// Fall back to plain text if all structured versions were rejected.
+			fmt.Fprintf(&b, "if [ \"$code\" = '406' ]; then\n")
+			fmt.Fprintf(&b, "  code=$(curl -sk --max-time %d -o /tmp/body -w '%%{http_code}' -H \"Authorization: Bearer $TOKEN\" '%s' 2>/tmp/err)\n", curlTimeoutSec, s.url)
+			fmt.Fprintf(&b, "fi\n")
+		} else {
+			fmt.Fprintf(&b, "code=$(curl -sk --max-time %d -o /tmp/body -w '%%{http_code}' -H \"Authorization: Bearer $TOKEN\" '%s' 2>/tmp/err)\n", curlTimeoutSec, s.url)
 		}
 
-		fmt.Fprintf(&b, "code=$(curl -sk --max-time %d -o /tmp/body -w '%%{http_code}' -H \"Authorization: Bearer $TOKEN\"%s '%s' 2>/tmp/err)\n", curlTimeoutSec, acceptHeader, s.url)
 		fmt.Fprintf(&b, "echo \"%s$code\"\n", markerCode)
 		fmt.Fprintf(&b, "echo '%s'\n", markerBody)
 		b.WriteString("base64 /tmp/body 2>/dev/null\n")

@@ -126,22 +126,28 @@ func Run(ctx context.Context, client *k8s.Client, opts Options) (*Dump, error) {
 	return dump, nil
 }
 
-// structuredAccept maps z-page names to the Accept header value that requests
-// structured JSON from Kubernetes v1.35+ (config.k8s.io/v1alpha1).
-var structuredAccept = map[string]string{
-	"flagz":   "application/json;v=v1alpha1;g=config.k8s.io;as=Flagz",
-	"statusz": "application/json;v=v1alpha1;g=config.k8s.io;as=Statusz",
+// structuredAccept lists the Accept header values to try for each z-page, from
+// newest to oldest. v1beta1 (Kubernetes v1.36+) is preferred; v1alpha1 (v1.35)
+// is the fallback. If both are rejected (406) the page is fetched as plain text.
+var structuredAccept = map[string][]string{
+	"flagz": {
+		"application/json;v=v1beta1;g=config.k8s.io;as=Flagz",
+		"application/json;v=v1alpha1;g=config.k8s.io;as=Flagz",
+	},
+	"statusz": {
+		"application/json;v=v1beta1;g=config.k8s.io;as=Statusz",
+		"application/json;v=v1alpha1;g=config.k8s.io;as=Statusz",
+	},
 }
 
 // fetchPage retrieves a single z-page via the API server proxy. The returned
 // Page always has Name/Path set; Content or Error is populated by the outcome.
 //
-// For flagz and statusz, a structured JSON response is requested first
-// (Kubernetes v1.35+). If the server returns 406 the page is re-fetched as
-// plain text so older clusters still work.
+// For flagz and statusz it tries structured JSON Accept headers from newest to
+// oldest API version, falling back to plain text on clusters that predate the
+// feature.
 func fetchPage(ctx context.Context, client *k8s.Client, basePath, page string, timeout time.Duration) Page {
 	path := basePath + "/" + page
-	p := Page{Name: page, Path: path}
 
 	reqCtx := ctx
 
@@ -152,45 +158,31 @@ func fetchPage(ctx context.Context, client *k8s.Client, basePath, page string, t
 		defer cancel()
 	}
 
+	if versions, ok := structuredAccept[page]; ok {
+		for _, accept := range versions {
+			p := fetchPageWithAccept(reqCtx, client, path, page, accept)
+			if p.Error != "" && isNotAcceptable(p.Error) {
+				continue
+			}
+
+			return p
+		}
+	}
+
+	return fetchPageWithAccept(reqCtx, client, path, page, "")
+}
+
+// fetchPageWithAccept fetches a z-page with an optional Accept header.
+func fetchPageWithAccept(ctx context.Context, client *k8s.Client, path, page, accept string) Page {
+	p := Page{Name: page, Path: path}
+
 	req := client.Clientset.CoreV1().RESTClient().Get().AbsPath(path)
 
-	if accept, ok := structuredAccept[page]; ok {
+	if accept != "" {
 		req.SetHeader("Accept", accept)
 	}
 
-	result := req.Do(reqCtx)
-
-	var contentType string
-	result.ContentType(&contentType)
-	p.ContentType = contentType
-
-	body, err := result.Raw()
-	if err != nil {
-		// A 406 means the cluster does not support structured zpages;
-		// retry without the Accept header to get plain text.
-		if accept, ok := structuredAccept[page]; ok && isNotAcceptable(body, accept) {
-			return fetchPagePlain(reqCtx, client, path, page)
-		}
-
-		if len(body) > 0 {
-			p.Error = fmt.Sprintf("%v: %s", err, string(body))
-		} else {
-			p.Error = err.Error()
-		}
-
-		return p
-	}
-
-	p.Content = string(body)
-
-	return p
-}
-
-// fetchPagePlain re-fetches a z-page without any structured Accept header.
-func fetchPagePlain(ctx context.Context, client *k8s.Client, path, page string) Page {
-	p := Page{Name: page, Path: path}
-
-	result := client.Clientset.CoreV1().RESTClient().Get().AbsPath(path).Do(ctx)
+	result := req.Do(ctx)
 
 	var contentType string
 	result.ContentType(&contentType)
@@ -212,8 +204,8 @@ func fetchPagePlain(ctx context.Context, client *k8s.Client, path, page string) 
 	return p
 }
 
-// isNotAcceptable checks whether a failed response body looks like a 406 Not
-// Acceptable from the API server for the given Accept value.
-func isNotAcceptable(body []byte, _ string) bool {
-	return len(body) > 0 && strings.Contains(string(body), "NotAcceptable")
+// isNotAcceptable checks whether an error string indicates a 406 Not Acceptable
+// response from the API server.
+func isNotAcceptable(errMsg string) bool {
+	return strings.Contains(errMsg, "NotAcceptable")
 }

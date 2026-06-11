@@ -325,6 +325,7 @@ var htmlTemplate = template.Must(template.New("dump").Parse(`<!DOCTYPE html>
   .flags-table, .status-table { border-collapse: collapse; width: 100%; font-size: .9rem; }
   .flags-table th { text-align: left; border-bottom: 2px solid #8884; padding: .4rem .75rem; }
   .flags-table td, .status-table td { padding: .3rem .75rem; border-bottom: 1px solid #8882; }
+  .flags-table tbody tr:nth-child(even), .status-table tbody tr:nth-child(even) { background: #00000008; }
   .flag-name { font-family: monospace; font-weight: 600; white-space: nowrap; }
   .flag-value { font-family: monospace; word-break: break-all; }
   .status-table td:first-child { width: 180px; }
