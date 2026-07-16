@@ -494,8 +494,8 @@ var htmlTemplate = template.Must(template.New("dump").Parse(`<!DOCTYPE html>
   .config-table details summary { cursor: pointer; }
   .config-list { font-family: monospace; font-size: .85rem; margin: .25rem 0; padding-left: 1.5rem; }
   .config-array-item { margin: .25rem 0 .25rem .75rem; }
-  .zd-filled td { font-style: italic; opacity: 0.7; }
-  .zd-filled td.flag-name::after { content: " (default)"; font-size: 0.75em; font-weight: normal; opacity: 0.6; }
+  .zd-filled td, .zd-filled summary.flag-name { font-style: italic; opacity: 0.7; }
+  .zd-filled td.flag-name::after, .zd-filled summary.flag-name::after { content: " (default)"; font-size: 0.75em; font-weight: normal; opacity: 0.6; }
   .zd-legend { font-size: .8rem; opacity: .6; font-style: italic; margin-top: .75rem; padding: .5rem .75rem;
                border-left: 2px solid #3498db; background: #3498db08; }
   .error { background: #c0392b18; border-left: 3px solid #c0392b; padding: .75rem 1rem;
