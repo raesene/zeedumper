@@ -9,6 +9,7 @@ var kubeletDefaults_v1_36 = map[string]interface{}{
 	"enableContentionProfiling": false,
 	"kernelMemcgNotification":   false,
 	"protectKernelDefaults":     false,
+	"rotateCertificates":        false,
 	"runOnce":                   false,
 	"serverTLSBootstrap":        false,
 
