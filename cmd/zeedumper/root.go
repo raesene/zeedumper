@@ -20,8 +20,9 @@ const envPrefix = "ZEEDUMPER"
 
 func newRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "zeedumper",
-		Short: "Dump Kubernetes component z-pages (flagz, statusz, configz)",
+		Use:     "zeedumper",
+		Short:   "Dump Kubernetes component z-pages (flagz, statusz, configz)",
+		Version: fmt.Sprintf("%s (commit %s, built %s)", version, commit, date),
 		Long: `zeedumper connects to a Kubernetes cluster using your kubeconfig and
 retrieves component z-pages through the API server proxy.
 
