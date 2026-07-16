@@ -1,7 +1,7 @@
 # zeedumper
 
 `zeedumper` connects to a Kubernetes cluster using your kubeconfig and dumps
-component **z-pages** — `flagz`, `statusz`, and (for the kubelet) `configz` —
+component **z-pages** — `flagz`, `statusz`, and `configz` —
 retrieving them through the **API server proxy**. The only credentials in play
 are those in your kubeconfig; the tool is read-only and never mutates the
 cluster.
@@ -10,16 +10,34 @@ It presents the results as structured text, JSON, or a self-contained HTML page.
 
 ## Supported components
 
-| Component                 | Pages                      | How it's reached                                    |
-| ------------------------- | -------------------------- | --------------------------------------------------- |
-| `kube-apiserver`          | `flagz`, `statusz`         | API server's own endpoints (`/flagz`)               |
-| `kube-controller-manager` | `flagz`, `statusz`         | node agent → `https://127.0.0.1:10257`              |
-| `kube-scheduler`          | `flagz`, `statusz`         | node agent → `https://127.0.0.1:10259`              |
-| `kube-proxy`              | `flagz`, `statusz`         | node agent → `http://127.0.0.1:10249`               |
-| `kubelet`                 | `flagz`, `statusz`, `configz` | node proxy, `/api/v1/nodes/<node>:10250/proxy/...` |
+| Component                 | Pages                         | How it's reached                                    |
+| ------------------------- | ----------------------------- | --------------------------------------------------- |
+| `kube-apiserver`          | `flagz`, `statusz`            | API server's own endpoints (`/flagz`)               |
+| `kube-controller-manager` | `flagz`, `statusz`, `configz` | node agent → `https://127.0.0.1:10257`              |
+| `kube-scheduler`          | `flagz`, `statusz`, `configz` | node agent → `https://127.0.0.1:10259`              |
+| `kube-proxy`              | `flagz`, `statusz`, `configz` | node agent → `http://127.0.0.1:10249`               |
+| `kubelet`                 | `flagz`, `statusz`, `configz` | node proxy, `/api/v1/nodes/<node>:10250/proxy/...`  |
 
 `kube-apiserver` and `kubelet` are reachable through the API server proxy, so
 those are pure read-only requests with your kubeconfig credentials.
+
+## Effective configuration (configz defaults filling)
+
+The `configz` endpoint returns the running configuration as JSON, but Go's
+`omitempty` serialization silently drops fields whose effective value is a Go
+zero value (`false`, `0`, `""`, `nil`). For the kubelet, this hides 39 of 125
+fields — including security-relevant settings like `readOnlyPort: 0` (disabled),
+`protectKernelDefaults: false`, and `serverTLSBootstrap: false`.
+
+zeedumper detects the cluster's Kubernetes version and automatically fills in
+these missing fields with their known zero-value defaults, so the output
+shows the **complete effective configuration**. In HTML output, filled-in fields
+are visually annotated (italic with a "(default)" marker) so you can distinguish
+endpoint-reported values from inferred defaults.
+
+This feature currently supports **kubelet** and **kube-proxy** on Kubernetes
+**v1.36**. For unsupported versions or components, configz is displayed as-is
+without filling.
 
 > **Note:** `flagz` and `statusz` are recent, feature-gated endpoints
 > (KEP-4827). On clusters where they are disabled, or where RBAC blocks access,

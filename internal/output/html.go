@@ -7,8 +7,10 @@ import (
 	"io"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
+	"github.com/raesene/zeedumper/internal/configz"
 	"github.com/raesene/zeedumper/internal/dumper"
 )
 
@@ -72,7 +74,7 @@ func formatContent(s string) (formatted string, isJSON bool) {
 
 // renderStructuredHTML tries to produce a rich HTML rendering of structured
 // zpages JSON. Returns empty string if the content is not recognised.
-func renderStructuredHTML(pageName, content string) template.HTML {
+func renderStructuredHTML(pageName, content, componentName string, k8sMinor int) template.HTML {
 	trimmed := strings.TrimSpace(content)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		return ""
@@ -92,7 +94,7 @@ func renderStructuredHTML(pageName, content string) template.HTML {
 	case "Statusz":
 		return renderStatuszHTML(trimmed)
 	default:
-		return renderConfigzHTML(pageName, trimmed)
+		return renderConfigzHTML(pageName, trimmed, componentName, k8sMinor)
 	}
 }
 
@@ -181,9 +183,20 @@ func renderStatuszHTML(raw string) template.HTML {
 	return template.HTML(b.String())
 }
 
-func renderConfigzHTML(pageName, raw string) template.HTML {
+func renderConfigzHTML(pageName, raw, componentName string, k8sMinor int) template.HTML {
 	if pageName != "configz" {
 		return ""
+	}
+
+	var filled map[string]bool
+
+	result, err := configz.Merge(raw, componentName, k8sMinor)
+	if err == nil && len(result.Filled) > 0 {
+		filled = result.Filled
+		merged, merr := json.Marshal(result.Merged)
+		if merr == nil {
+			raw = string(merged)
+		}
 	}
 
 	var obj map[string]json.RawMessage
@@ -210,7 +223,11 @@ func renderConfigzHTML(pageName, raw string) template.HTML {
 			continue
 		}
 
-		renderConfigValue(&b, val, 0)
+		renderConfigValue(&b, val, 0, "", filled)
+	}
+
+	if len(filled) > 0 {
+		fmt.Fprintf(&b, `<div class="zd-legend">%d field(s) marked <em>(default)</em> were not present in the endpoint response and have been filled with their Go zero-value defaults for Kubernetes v1.%d.</div>`, len(filled), k8sMinor)
 	}
 
 	b.WriteString(`</div>`)
@@ -219,7 +236,9 @@ func renderConfigzHTML(pageName, raw string) template.HTML {
 }
 
 // renderConfigValue recursively renders a JSON value as nested config tables.
-func renderConfigValue(b *strings.Builder, val interface{}, depth int) {
+// path tracks the current dot-separated field path, and filled marks fields
+// that were inserted from the defaults table.
+func renderConfigValue(b *strings.Builder, val interface{}, depth int, path string, filled map[string]bool) {
 	switch v := val.(type) {
 	case map[string]interface{}:
 		b.WriteString(`<table class="config-table"><tbody>`)
@@ -233,13 +252,23 @@ func renderConfigValue(b *strings.Builder, val interface{}, depth int) {
 
 		for _, k := range keys {
 			child := v[k]
+			childPath := k
+			if path != "" {
+				childPath = path + "." + k
+			}
+
+			trClass := ""
+			if filled[childPath] {
+				trClass = ` class="zd-filled"`
+			}
+
 			if isScalar(child) {
-				fmt.Fprintf(b, `<tr><td class="flag-name">%s</td><td class="flag-value">%s</td></tr>`,
-					template.HTMLEscapeString(k), template.HTMLEscapeString(formatScalar(child)))
+				fmt.Fprintf(b, `<tr%s><td class="flag-name">%s</td><td class="flag-value">%s</td></tr>`,
+					trClass, template.HTMLEscapeString(k), template.HTMLEscapeString(formatScalar(child)))
 			} else {
-				fmt.Fprintf(b, `<tr><td colspan="2"><details%s><summary class="flag-name">%s</summary>`,
-					openAttr(depth), template.HTMLEscapeString(k))
-				renderConfigValue(b, child, depth+1)
+				fmt.Fprintf(b, `<tr%s><td colspan="2"><details%s><summary class="flag-name">%s</summary>`,
+					trClass, openAttr(depth), template.HTMLEscapeString(k))
+				renderConfigValue(b, child, depth+1, childPath, filled)
 				b.WriteString(`</details></td></tr>`)
 			}
 		}
@@ -263,7 +292,7 @@ func renderConfigValue(b *strings.Builder, val interface{}, depth int) {
 		} else {
 			for i, item := range v {
 				fmt.Fprintf(b, `<div class="config-array-item"><span class="flag-name">[%d]</span>`, i)
-				renderConfigValue(b, item, depth+1)
+				renderConfigValue(b, item, depth+1, path+"."+strconv.Itoa(i), filled)
 				b.WriteString(`</div>`)
 			}
 		}
@@ -353,6 +382,8 @@ func sanitizeAnchor(s string) string {
 }
 
 func buildView(d *dumper.Dump) htmlView {
+	k8sMinor := parseMinorVersion(d.ServerVersion)
+
 	v := htmlView{Cluster: d.Cluster, Context: d.Context, Timestamp: d.Timestamp}
 	for _, comp := range d.Components {
 		cv := componentView{Name: comp.Name}
@@ -362,7 +393,7 @@ func buildView(d *dumper.Dump) htmlView {
 			iv := instanceView{Name: inst.Name, Anchor: instAnchor}
 			for _, page := range inst.Pages {
 				content, isJSON := formatContent(page.Content)
-				richHTML := renderStructuredHTML(page.Name, page.Content)
+				richHTML := renderStructuredHTML(page.Name, page.Content, comp.Name, k8sMinor)
 
 				iv.Pages = append(iv.Pages, pageView{
 					Name:    page.Name,
@@ -383,6 +414,24 @@ func buildView(d *dumper.Dump) htmlView {
 	}
 
 	return v
+}
+
+func parseMinorVersion(serverVersion string) int {
+	if serverVersion == "" {
+		return 0
+	}
+
+	parts := strings.SplitN(serverVersion, ".", 2)
+	if len(parts) < 2 {
+		return 0
+	}
+
+	minor, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return 0
+	}
+
+	return minor
 }
 
 func renderHTML(w io.Writer, d *dumper.Dump) error {
@@ -445,6 +494,10 @@ var htmlTemplate = template.Must(template.New("dump").Parse(`<!DOCTYPE html>
   .config-table details summary { cursor: pointer; }
   .config-list { font-family: monospace; font-size: .85rem; margin: .25rem 0; padding-left: 1.5rem; }
   .config-array-item { margin: .25rem 0 .25rem .75rem; }
+  .zd-filled td { font-style: italic; opacity: 0.7; }
+  .zd-filled td.flag-name::after { content: " (default)"; font-size: 0.75em; font-weight: normal; opacity: 0.6; }
+  .zd-legend { font-size: .8rem; opacity: .6; font-style: italic; margin-top: .75rem; padding: .5rem .75rem;
+               border-left: 2px solid #3498db; background: #3498db08; }
   .error { background: #c0392b18; border-left: 3px solid #c0392b; padding: .75rem 1rem;
            border-radius: 4px; font-family: monospace; font-size: .85rem; white-space: pre-wrap; }
   .badge { font-size: .7rem; padding: .1rem .4rem; border-radius: 4px;

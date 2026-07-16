@@ -131,6 +131,12 @@ func runDump(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
+	if minor, verr := client.ServerMinorVersion(); verr == nil {
+		dump.ServerVersion = fmt.Sprintf("1.%d", minor)
+	} else {
+		fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not detect server version: %v\n", verr)
+	}
+
 	if outputFile == "" {
 		return output.Render(cmd.OutOrStdout(), dump, format)
 	}

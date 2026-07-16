@@ -27,8 +27,9 @@ type Component struct {
 
 // Dump is the complete result of a run, ready to be rendered in any format.
 type Dump struct {
-	Cluster    string      `json:"cluster"`
-	Context    string      `json:"context,omitempty"`
-	Timestamp  string      `json:"timestamp"`
-	Components []Component `json:"components"`
+	Cluster       string      `json:"cluster"`
+	Context       string      `json:"context,omitempty"`
+	Timestamp     string      `json:"timestamp"`
+	ServerVersion string      `json:"serverVersion,omitempty"`
+	Components    []Component `json:"components"`
 }

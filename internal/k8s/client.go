@@ -6,6 +6,8 @@ package k8s
 
 import (
 	"fmt"
+	"strconv"
+	"strings"
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
@@ -51,4 +53,23 @@ func New(kubeconfigPath string) (*Client, error) {
 		Context:   contextName,
 		Host:      restConfig.Host,
 	}, nil
+}
+
+// ServerMinorVersion returns the Kubernetes minor version of the connected
+// cluster (e.g. 36 for v1.36.x). The Minor field from the discovery API
+// sometimes has a trailing "+" which is stripped before parsing.
+func (c *Client) ServerMinorVersion() (int, error) {
+	info, err := c.Clientset.Discovery().ServerVersion()
+	if err != nil {
+		return 0, fmt.Errorf("fetching server version: %w", err)
+	}
+
+	minor := strings.TrimRight(info.Minor, "+")
+
+	v, err := strconv.Atoi(minor)
+	if err != nil {
+		return 0, fmt.Errorf("parsing minor version %q: %w", info.Minor, err)
+	}
+
+	return v, nil
 }
