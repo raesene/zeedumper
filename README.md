@@ -25,7 +25,7 @@ those are pure read-only requests with your kubeconfig credentials.
 
 The `configz` endpoint returns the running configuration as JSON, but Go's
 `omitempty` serialization silently drops fields whose effective value is a Go
-zero value (`false`, `0`, `""`, `nil`). For the kubelet, this hides 39 of 125
+zero value (`false`, `0`, `""`, `nil`). For the kubelet, this hides 46 of 125
 fields — including security-relevant settings like `readOnlyPort: 0` (disabled),
 `protectKernelDefaults: false`, and `serverTLSBootstrap: false`.
 

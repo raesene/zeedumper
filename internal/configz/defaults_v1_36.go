@@ -19,36 +19,41 @@ var kubeletDefaults_v1_36 = map[string]interface{}{
 	"readOnlyPort":              float64(0),
 
 	// Empty strings
-	"imageServiceEndpoint":      "",
-	"kubeletCgroups":            "",
-	"kubeReservedCgroup":        "",
-	"podCIDR":                   "",
-	"reservedSystemCPUs":        "",
+	"cgroupRoot":                  "",
+	"clusterDomain":               "",
+	"imageServiceEndpoint":        "",
+	"kubeletCgroups":              "",
+	"kubeReservedCgroup":          "",
+	"podCIDR":                     "",
+	"providerID":                  "",
+	"reservedSystemCPUs":          "",
 	"showHiddenMetricsForVersion": "",
-	"staticPodURL":              "",
-	"systemCgroups":             "",
-	"systemReservedCgroup":      "",
-	"tlsMinVersion":             "",
+	"staticPodPath":               "",
+	"staticPodURL":                "",
+	"systemCgroups":               "",
+	"systemReservedCgroup":        "",
+	"tlsMinVersion":               "",
 
 	// Nil slices (rendered as empty lists)
-	"allowedUnsafeSysctls":                   []interface{}{},
-	"preloadedImagesVerificationAllowlist":    []interface{}{},
-	"registerWithTaints":                      []interface{}{},
-	"reservedMemory":                          []interface{}{},
-	"shutdownGracePeriodByPodPriority":        []interface{}{},
-	"tlsCipherSuites":                         []interface{}{},
-	"tlsCurvePreferences":                     []interface{}{},
+	"clusterDNS":                           []interface{}{},
+	"allowedUnsafeSysctls":                 []interface{}{},
+	"preloadedImagesVerificationAllowlist": []interface{}{},
+	"registerWithTaints":                   []interface{}{},
+	"reservedMemory":                       []interface{}{},
+	"shutdownGracePeriodByPodPriority":     []interface{}{},
+	"tlsCipherSuites":                      []interface{}{},
+	"tlsCurvePreferences":                  []interface{}{},
 
 	// Nil maps (rendered as empty objects)
-	"cpuManagerPolicyOptions":    map[string]interface{}{},
-	"evictionMinimumReclaim":     map[string]interface{}{},
-	"evictionSoft":               map[string]interface{}{},
-	"evictionSoftGracePeriod":    map[string]interface{}{},
-	"featureGates":               map[string]interface{}{},
-	"kubeReserved":               map[string]interface{}{},
-	"qosReserved":                map[string]interface{}{},
-	"staticPodURLHeader":         map[string]interface{}{},
-	"systemReserved":             map[string]interface{}{},
+	"cpuManagerPolicyOptions":      map[string]interface{}{},
+	"evictionMinimumReclaim":       map[string]interface{}{},
+	"evictionSoft":                 map[string]interface{}{},
+	"evictionSoftGracePeriod":      map[string]interface{}{},
+	"featureGates":                 map[string]interface{}{},
+	"kubeReserved":                 map[string]interface{}{},
+	"qosReserved":                  map[string]interface{}{},
+	"staticPodURLHeader":           map[string]interface{}{},
+	"systemReserved":               map[string]interface{}{},
 	"topologyManagerPolicyOptions": map[string]interface{}{},
 
 	// Nil pointers
@@ -58,17 +63,23 @@ var kubeletDefaults_v1_36 = map[string]interface{}{
 
 	// Empty struct
 	"tracing": map[string]interface{}{},
+
+	// Nested: memorySwap object is present but its swapBehavior field defaults
+	// to "" (meaning NoSwap) and is dropped by omitempty. mergeDefaults recurses
+	// into the existing memorySwap map and fills the missing child.
+	"memorySwap": map[string]interface{}{
+		"swapBehavior": "",
+	},
 }
 
 // kubeProxyDefaults_v1_36 lists the KubeProxyConfiguration fields omitted by
 // configz due to omitempty in Kubernetes v1.36.
 var kubeProxyDefaults_v1_36 = map[string]interface{}{
-	// Nil slices
-	"nodePortAddresses": []interface{}{},
-
-	// Nil maps
+	// featureGates carries omitempty and defaults to an empty (len-0) map, so
+	// the API server drops it from configz.
 	"featureGates": map[string]interface{}{},
 
-	// Nested fields inside linux (if present)
-	"linux": map[string]interface{}{},
+	// windowsRunAsService is a Windows-only bool with omitempty defaulting to
+	// false, so configz drops it at its default (always, on Linux nodes).
+	"windowsRunAsService": false,
 }

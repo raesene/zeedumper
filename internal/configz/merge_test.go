@@ -53,6 +53,58 @@ func TestMergeKubelet(t *testing.T) {
 	}
 }
 
+func TestMergeKubeletNewlyCoveredDefaults(t *testing.T) {
+	// A configz body where the zero-value defaults added to close the fill gaps
+	// are all absent (dropped by omitempty), including the nested memorySwap.
+	input := `{
+		"kubeletconfig": {
+			"kind": "KubeletConfiguration",
+			"memorySwap": {}
+		}
+	}`
+
+	result, err := Merge(input, "kubelet", 36)
+	if err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+
+	inner := result.Merged["kubeletconfig"].(map[string]interface{})
+
+	// Top-level string/slice defaults that were previously under-reported.
+	wantString := []string{"cgroupRoot", "clusterDomain", "providerID", "staticPodPath"}
+	for _, k := range wantString {
+		v, ok := inner[k]
+		if !ok {
+			t.Errorf("%s not inserted", k)
+		} else if v != "" {
+			t.Errorf("%s: got %v, want empty string", k, v)
+		}
+		if !result.Filled[k] {
+			t.Errorf("%s not in Filled set", k)
+		}
+	}
+
+	if v, ok := inner["clusterDNS"]; !ok {
+		t.Error("clusterDNS not inserted")
+	} else if s, ok := v.([]interface{}); !ok || len(s) != 0 {
+		t.Errorf("clusterDNS: got %v, want empty slice", v)
+	}
+
+	// Nested fill: memorySwap is present but its swapBehavior child is dropped.
+	ms, ok := inner["memorySwap"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("memorySwap: got %T, want map", inner["memorySwap"])
+	}
+	if v, ok := ms["swapBehavior"]; !ok {
+		t.Error("memorySwap.swapBehavior not inserted")
+	} else if v != "" {
+		t.Errorf("memorySwap.swapBehavior: got %v, want empty string", v)
+	}
+	if !result.Filled["memorySwap.swapBehavior"] {
+		t.Error("memorySwap.swapBehavior not in Filled set")
+	}
+}
+
 func TestMergeKubeProxy(t *testing.T) {
 	input := `{
 		"kubeproxy.config.k8s.io": {
@@ -74,6 +126,23 @@ func TestMergeKubeProxy(t *testing.T) {
 
 	if _, ok := inner["featureGates"]; !ok {
 		t.Error("featureGates not inserted for kube-proxy")
+	}
+
+	// windowsRunAsService (omitempty bool, default false) is dropped by configz
+	// and must be filled.
+	if v, ok := inner["windowsRunAsService"]; !ok {
+		t.Error("windowsRunAsService not inserted for kube-proxy")
+	} else if v != false {
+		t.Errorf("windowsRunAsService: got %v, want false", v)
+	}
+	if !result.Filled["windowsRunAsService"] {
+		t.Error("windowsRunAsService not in Filled set")
+	}
+
+	// KubeProxyConfiguration v1alpha1 has no `linux` field; it must not be
+	// fabricated into the output.
+	if _, ok := inner["linux"]; ok {
+		t.Error("kube-proxy output should not contain a fabricated `linux` field")
 	}
 }
 
