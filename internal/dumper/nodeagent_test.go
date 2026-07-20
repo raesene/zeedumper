@@ -84,6 +84,56 @@ func TestKubeletStatuszWanted(t *testing.T) {
 	}
 }
 
+func TestConfigzAuthWanted(t *testing.T) {
+	https := map[string]localComponent{"kube-scheduler": {name: "kube-scheduler", scheme: "https"}}
+	httpOnly := map[string]localComponent{"kube-proxy": {name: "kube-proxy", scheme: "http"}}
+
+	tests := []struct {
+		name   string
+		wanted map[string]localComponent
+		pages  []string
+		want   bool
+	}{
+		{name: "https component, all pages", wanted: https, pages: nil, want: true},
+		{name: "https component, configz only", wanted: https, pages: []string{"configz"}, want: true},
+		{name: "https component, configz filtered out", wanted: https, pages: []string{"flagz", "statusz"}, want: false},
+		{name: "http-only component needs no grant", wanted: httpOnly, pages: nil, want: false},
+		{name: "no loopback components", wanted: map[string]localComponent{}, pages: nil, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := configzAuthWanted(tt.wanted, tt.pages); got != tt.want {
+				t.Errorf("configzAuthWanted(%v, %v) = %v, want %v", tt.wanted, tt.pages, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGrantSummary(t *testing.T) {
+	tests := []struct {
+		name   string
+		grants rbacGrants
+		want   string
+	}{
+		{name: "none", grants: rbacGrants{}, want: "no rbac"},
+		{name: "monitoring only", grants: rbacGrants{monitoring: true}, want: "clusterrolebinding -> system:monitoring"},
+		{name: "configz only", grants: rbacGrants{configz: true}, want: "clusterrole+binding (/configz)"},
+		{
+			name:   "all three",
+			grants: rbacGrants{monitoring: true, kubeletStatusz: true, configz: true},
+			want:   "clusterrolebinding -> system:monitoring and clusterrole+binding (nodes/statusz) and clusterrole+binding (/configz)",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &rbacAgent{grants: tt.grants}
+			if got := r.grantSummary(); got != tt.want {
+				t.Errorf("grantSummary() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestNodeFetchSpecsKubeletStatusz(t *testing.T) {
 	node := corev1.Node{}
 	node.Name = "worker-1" // not a control-plane node

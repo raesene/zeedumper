@@ -68,22 +68,28 @@ these, zeedumper temporarily:
 1. creates a `ServiceAccount` (in `--namespace`, default `kube-system`),
 2. grants it the permissions each target needs:
    - the built-in `system:monitoring` ClusterRole — which grants `GET` on the
-     `/flagz` and `/statusz` non-resource URLs the loopback components serve, and
+     `/flagz` and `/statusz` non-resource URLs the loopback components serve,
    - **only when the kubelet is dumped**, a dedicated ClusterRole granting `get`
      on the `nodes/statusz` resource (the kubelet authorizes `/statusz` as a
      resource, not a non-resource URL, so `system:monitoring` does not cover it
-     and no built-in role grants it),
+     and no built-in role grants it), and
+   - **only when `kube-scheduler`/`kube-controller-manager` `configz` is
+     dumped**, a dedicated ClusterRole granting `get` on the `/configz`
+     non-resource URL (these components delegate authorization for `/configz`,
+     and `system:monitoring` deliberately omits it; `kube-proxy` serves
+     `configz` unauthenticated so it needs no grant),
 3. schedules a short-lived **host-network** pod (tolerating all taints) on each
    eligible node, which `curl`s the loopback endpoints — and the kubelet's
    `https://127.0.0.1:10250/statusz` — using the ServiceAccount's projected
    token,
 4. collects the output from the pod logs, and
-5. **deletes the pod(s), ClusterRoleBinding(s), the kubelet-statusz ClusterRole,
-   and the ServiceAccount** — including if the run errors or is interrupted.
+5. **deletes the pod(s), ClusterRoleBinding(s), the kubelet-statusz and
+   `/configz` ClusterRoles, and the ServiceAccount** — including if the run
+   errors or is interrupted.
 
 Only the resources actually needed for the requested components are created: a
 kubelet-only dump creates the `nodes/statusz` ClusterRole and binding but not
-the `system:monitoring` binding, and vice versa.
+the `system:monitoring` binding or the `/configz` ClusterRole, and vice versa.
 
 The kubelet runs on **every** node, so a kubelet dump schedules an agent pod on
 every node (like `kube-proxy`), not just the control plane. Its `flagz` and
@@ -106,9 +112,10 @@ pull it.
 Beyond the proxy permissions, the node-agent strategy additionally requires
 `create`/`delete` on `serviceaccounts`, `pods`, `clusterroles`, and
 `clusterrolebindings`, plus the ability to bind the `system:monitoring` role.
-Creating the kubelet-statusz ClusterRole is also subject to RBAC's
-escalation-prevention rule, so your identity must itself hold `get` on
-`nodes/statusz` (or the `escalate` verb on `clusterroles`).
+Creating the kubelet-statusz and `/configz` ClusterRoles is also subject to
+RBAC's escalation-prevention rule, so your identity must itself hold `get` on
+`nodes/statusz` and on the `/configz` non-resource URL (or the `escalate` verb
+on `clusterroles`).
 
 ## Install
 
@@ -193,8 +200,10 @@ Your kubeconfig identity needs:
 - and, unless `--no-node-pods` is set, `create`/`delete` on `serviceaccounts`
   and `pods` in `--namespace` plus `create`/`delete` on `clusterroles` and
   `clusterrolebindings`, with permission to bind the `system:monitoring`
-  ClusterRole and (for the kubelet's `statusz`) to grant `nodes/statusz` —
-  i.e. your identity holds that permission or the `escalate` verb.
+  ClusterRole and (for the kubelet's `statusz`) to grant `nodes/statusz` and
+  (for scheduler/controller-manager `configz`) to grant the `/configz`
+  non-resource URL — i.e. your identity holds those permissions or the
+  `escalate` verb.
 
 ## Testing
 

@@ -52,6 +52,12 @@ const (
 	// grants the SA a dedicated nodes/statusz ClusterRole (see setup).
 	kubeletStatuszURL = "https://127.0.0.1:10250/statusz"
 
+	// configzURL is the non-resource URL the https loopback components
+	// (scheduler, controller-manager) authorize /configz as. system:monitoring
+	// deliberately excludes /configz, so the node agent grants the SA a
+	// dedicated ClusterRole for it (see setupConfigz).
+	configzURL = "/configz"
+
 	//nolint:gosec // G101: this is the well-known projected-token mount path, not a credential.
 	agentTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 
@@ -114,7 +120,12 @@ func gatherViaNodePods(ctx context.Context, client *k8s.Client, requested, pages
 	}
 
 	if len(work) > 0 {
-		if err := runNodeAgents(ctx, cs, namespace, work, covered, opts, results, len(wanted) > 0, kubeletStatusz); err != nil {
+		grants := rbacGrants{
+			monitoring:     len(wanted) > 0,
+			kubeletStatusz: kubeletStatusz,
+			configz:        configzAuthWanted(wanted, pages),
+		}
+		if err := runNodeAgents(ctx, cs, namespace, work, covered, opts, results, grants); err != nil {
 			return nil, err
 		}
 	}
@@ -132,6 +143,25 @@ func kubeletStatuszWanted(requested, pages []string) bool {
 	}
 
 	return len(pages) == 0 || slices.Contains(pages, "statusz")
+}
+
+// configzAuthWanted reports whether the node agent needs the dedicated
+// /configz ClusterRole. Only the https loopback components (scheduler,
+// controller-manager) delegate authorization for /configz, and only when
+// configz is among the requested pages; kube-proxy serves configz without any
+// authentication, so it needs no grant.
+func configzAuthWanted(wanted map[string]localComponent, pages []string) bool {
+	if len(pages) != 0 && !slices.Contains(pages, "configz") {
+		return false
+	}
+
+	for _, lc := range wanted {
+		if lc.scheme == "https" {
+			return true
+		}
+	}
+
+	return false
 }
 
 // wantedLocalComponents returns the loopback components the caller asked for.
@@ -198,9 +228,17 @@ func nodeFetchSpecs(node corev1.Node, wanted map[string]localComponent, pages []
 	return specs
 }
 
+// rbacGrants records which temporary permissions a node-agent run needs. Only
+// the resources actually required for the requested components are created.
+type rbacGrants struct {
+	monitoring     bool // bind system:monitoring (flagz/statusz non-resource URLs)
+	kubeletStatusz bool // create+bind a nodes/statusz ClusterRole for the kubelet
+	configz        bool // create+bind a /configz ClusterRole for https loopback components
+}
+
 // runNodeAgents performs the pre-pull check, sets up (and always tears down)
 // the temporary RBAC, and launches/collects an agent pod per node.
-func runNodeAgents(ctx context.Context, cs kubernetes.Interface, namespace string, work []nodeWork, covered map[string]bool, opts Options, results map[string][]Instance, bindMonitoring, bindKubeletStatusz bool) error {
+func runNodeAgents(ctx context.Context, cs kubernetes.Interface, namespace string, work []nodeWork, covered map[string]bool, opts Options, results map[string][]Instance, grants rbacGrants) error {
 	runID := opts.runID()
 	image := opts.nodePodImage()
 
@@ -222,7 +260,7 @@ func runNodeAgents(ctx context.Context, cs kubernetes.Interface, namespace strin
 
 	ra := &rbacAgent{
 		cs: cs, namespace: namespace, runID: runID, image: image,
-		bindMonitoring: bindMonitoring, bindKubeletStatusz: bindKubeletStatusz,
+		grants: grants,
 	}
 	if err := ra.setup(ctx); err != nil {
 		return fmt.Errorf("setting up node-agent RBAC: %w", err)
@@ -489,11 +527,8 @@ type rbacAgent struct {
 	runID     string
 	image     string
 
-	// bindMonitoring binds the SA to system:monitoring (for the loopback
-	// components' non-resource z-page URLs). bindKubeletStatusz creates and
-	// binds a dedicated nodes/statusz ClusterRole for the kubelet.
-	bindMonitoring     bool
-	bindKubeletStatusz bool
+	// grants records which temporary permissions to create for this run.
+	grants rbacGrants
 }
 
 func (r *rbacAgent) name() string { return "zeedumper-zpages-" + r.runID }
@@ -502,6 +537,10 @@ func (r *rbacAgent) name() string { return "zeedumper-zpages-" + r.runID }
 // its binding.
 func (r *rbacAgent) statuszName() string { return r.name() + "-kubelet-statusz" }
 
+// configzName is the name of the dedicated /configz ClusterRole and its binding
+// for the https loopback components.
+func (r *rbacAgent) configzName() string { return r.name() + "-configz" }
+
 func (r *rbacAgent) labels() map[string]string {
 	return map[string]string{"app": "zeedumper-zpages", "zeedumper-run": r.runID}
 }
@@ -509,12 +548,16 @@ func (r *rbacAgent) labels() map[string]string {
 // grantSummary describes the RBAC the agent created, for the narration line.
 func (r *rbacAgent) grantSummary() string {
 	var grants []string
-	if r.bindMonitoring {
+	if r.grants.monitoring {
 		grants = append(grants, "clusterrolebinding -> "+monitoringClusterRole)
 	}
 
-	if r.bindKubeletStatusz {
+	if r.grants.kubeletStatusz {
 		grants = append(grants, "clusterrole+binding (nodes/statusz)")
+	}
+
+	if r.grants.configz {
+		grants = append(grants, "clusterrole+binding (/configz)")
 	}
 
 	if len(grants) == 0 {
@@ -531,7 +574,7 @@ func (r *rbacAgent) setup(ctx context.Context) error {
 		return fmt.Errorf("creating serviceaccount: %w", err)
 	}
 
-	if r.bindMonitoring {
+	if r.grants.monitoring {
 		_, err := r.cs.RbacV1().ClusterRoleBindings().Create(ctx, &rbacv1.ClusterRoleBinding{
 			ObjectMeta: metav1.ObjectMeta{Name: r.name(), Labels: r.labels()},
 			RoleRef: rbacv1.RoleRef{
@@ -546,10 +589,48 @@ func (r *rbacAgent) setup(ctx context.Context) error {
 		}
 	}
 
-	if r.bindKubeletStatusz {
+	if r.grants.kubeletStatusz {
 		if err := r.setupKubeletStatusz(ctx); err != nil {
 			return err
 		}
+	}
+
+	if r.grants.configz {
+		if err := r.setupConfigz(ctx); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// setupConfigz creates the dedicated ClusterRole granting GET on the /configz
+// non-resource URL and binds the agent SA to it. The https loopback components
+// (scheduler, controller-manager) delegate authorization for /configz to the
+// API server, and system:monitoring deliberately omits it, so this grant is
+// what makes their configz retrievable.
+func (r *rbacAgent) setupConfigz(ctx context.Context) error {
+	if _, err := r.cs.RbacV1().ClusterRoles().Create(ctx, &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{Name: r.configzName(), Labels: r.labels()},
+		Rules: []rbacv1.PolicyRule{{
+			NonResourceURLs: []string{configzURL},
+			Verbs:           []string{"get"},
+		}},
+	}, metav1.CreateOptions{}); err != nil {
+		return fmt.Errorf("creating configz clusterrole: %w", err)
+	}
+
+	_, err := r.cs.RbacV1().ClusterRoleBindings().Create(ctx, &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: r.configzName(), Labels: r.labels()},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: "rbac.authorization.k8s.io",
+			Kind:     "ClusterRole",
+			Name:     r.configzName(),
+		},
+		Subjects: []rbacv1.Subject{r.subject()},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		return fmt.Errorf("creating configz clusterrolebinding: %w", err)
 	}
 
 	return nil
@@ -598,14 +679,16 @@ func (r *rbacAgent) teardown(ctx context.Context) {
 
 	// Delete every resource this run may have created; NotFound is expected for
 	// any that a given run did not need.
-	for _, crb := range []string{r.name(), r.statuszName()} {
+	for _, crb := range []string{r.name(), r.statuszName(), r.configzName()} {
 		if err := r.cs.RbacV1().ClusterRoleBindings().Delete(ctx, crb, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
 			fmt.Fprintf(stderr, "node-agent: warning: failed to delete clusterrolebinding %s: %v\n", crb, err)
 		}
 	}
 
-	if err := r.cs.RbacV1().ClusterRoles().Delete(ctx, r.statuszName(), metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-		fmt.Fprintf(stderr, "node-agent: warning: failed to delete clusterrole %s: %v\n", r.statuszName(), err)
+	for _, cr := range []string{r.statuszName(), r.configzName()} {
+		if err := r.cs.RbacV1().ClusterRoles().Delete(ctx, cr, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			fmt.Fprintf(stderr, "node-agent: warning: failed to delete clusterrole %s: %v\n", cr, err)
+		}
 	}
 
 	if err := r.cs.CoreV1().ServiceAccounts(r.namespace).Delete(ctx, r.name(), metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
