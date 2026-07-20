@@ -89,41 +89,100 @@ func Run(ctx context.Context, client *k8s.Client, opts Options) (*Dump, error) {
 	}
 
 	for _, name := range components {
-		if comp, ok := nodeAgentResults[name]; ok {
+		// Loopback components are wholly owned by the node agent. The kubelet is
+		// an exception: it is reached via the API proxy for flagz/configz and
+		// only has statusz supplied by the node agent, so it is merged in
+		// fetchComponent rather than replaced.
+		if comp, ok := nodeAgentResults[name]; ok && name != "kubelet" {
 			dump.Components = append(dump.Components, comp)
 			continue
 		}
 
-		spec := specs[name]
-		comp := Component{Name: name}
-
-		targets, derr := spec.discover(ctx, client.Clientset, namespace)
-		if derr != nil {
-			// Discovery failure (e.g. RBAC on list) is surfaced as a single
-			// synthetic instance so it is visible in every output format.
-			comp.Instances = append(comp.Instances, Instance{
-				Name:  "(discovery failed)",
-				Pages: []Page{{Name: "-", Error: derr.Error()}},
-			})
-			dump.Components = append(dump.Components, comp)
-
-			continue
-		}
-
-		for _, tgt := range targets {
-			inst := Instance{Name: tgt.instance}
-			for _, page := range filterPages(tgt.pages, opts.Pages) {
-				inst.Pages = append(inst.Pages, fetchPage(ctx, client, tgt.basePath, page, opts.Timeout))
-			}
-
-			comp.Instances = append(comp.Instances, inst)
-		}
-
-		sortInstances(comp.Instances)
-		dump.Components = append(dump.Components, comp)
+		dump.Components = append(dump.Components, fetchComponent(ctx, client, name, namespace, opts, nodeAgentResults))
 	}
 
 	return dump, nil
+}
+
+// fetchComponent discovers a component's instances and retrieves their z-pages
+// through the API server proxy, then grafts on any node-agent-fetched pages
+// (the kubelet's statusz) so a component split across both strategies is
+// presented as one.
+func fetchComponent(ctx context.Context, client *k8s.Client, name, namespace string, opts Options, nodeAgentResults map[string]Component) Component {
+	comp := Component{Name: name}
+
+	targets, derr := specs[name].discover(ctx, client.Clientset, namespace)
+	if derr != nil {
+		// Discovery failure (e.g. RBAC on list) is surfaced as a single
+		// synthetic instance so it is visible in every output format.
+		comp.Instances = append(comp.Instances, Instance{
+			Name:  "(discovery failed)",
+			Pages: []Page{{Name: "-", Error: derr.Error()}},
+		})
+
+		return comp
+	}
+
+	for _, tgt := range targets {
+		inst := Instance{Name: tgt.instance}
+		for _, page := range filterPages(tgt.pages, opts.Pages) {
+			inst.Pages = append(inst.Pages, fetchPage(ctx, client, tgt.basePath, page, opts.Timeout))
+		}
+
+		comp.Instances = append(comp.Instances, inst)
+	}
+
+	// Graft node-agent-fetched pages (kubelet statusz) onto the proxy instances,
+	// overriding the proxy's erroring statusz page per node. When node pods are
+	// disabled or produced nothing, the proxy result stands.
+	if na, ok := nodeAgentResults[name]; ok {
+		comp.Instances = overlayPages(comp.Instances, na.Instances)
+	}
+
+	sortInstances(comp.Instances)
+
+	return comp
+}
+
+// overlayPages merges supplemental instances into base, matched by instance
+// name. For a matching instance, each supplemental page replaces a same-named
+// page in place (preserving page order) or is appended if new. Instances with
+// no match in base are appended. Used to graft node-agent-fetched kubelet
+// statusz onto the proxy-discovered kubelet instances.
+func overlayPages(base, supplemental []Instance) []Instance {
+	idx := make(map[string]int, len(base))
+	for i, inst := range base {
+		idx[inst.Name] = i
+	}
+
+	for _, s := range supplemental {
+		i, ok := idx[s.Name]
+		if !ok {
+			base = append(base, s)
+			idx[s.Name] = len(base) - 1
+
+			continue
+		}
+
+		for _, p := range s.Pages {
+			base[i].Pages = replacePage(base[i].Pages, p)
+		}
+	}
+
+	return base
+}
+
+// replacePage overwrites the page with the same Name, or appends it if absent.
+func replacePage(pages []Page, p Page) []Page {
+	for i := range pages {
+		if pages[i].Name == p.Name {
+			pages[i] = p
+
+			return pages
+		}
+	}
+
+	return append(pages, p)
 }
 
 // structuredAccept lists the Accept header values to try for each z-page, from

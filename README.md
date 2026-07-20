@@ -16,10 +16,23 @@ It presents the results as structured text, JSON, or a self-contained HTML page.
 | `kube-controller-manager` | `flagz`, `statusz`, `configz` | node agent → `https://127.0.0.1:10257`              |
 | `kube-scheduler`          | `flagz`, `statusz`, `configz` | node agent → `https://127.0.0.1:10259`              |
 | `kube-proxy`              | `flagz`, `statusz`, `configz` | node agent → `http://127.0.0.1:10249`               |
-| `kubelet`                 | `flagz`, `statusz`, `configz` | node proxy, `/api/v1/nodes/<node>:10250/proxy/...`  |
+| `kubelet`                 | `flagz`, `statusz`, `configz` | node proxy `/api/v1/nodes/<node>:10250/proxy/...`; `statusz` via node agent |
 
-`kube-apiserver` and `kubelet` are reachable through the API server proxy, so
-those are pure read-only requests with your kubeconfig credentials.
+`kube-apiserver` and the kubelet's `flagz`/`configz` are reached through the API
+server proxy, so those are pure read-only requests with your kubeconfig
+credentials.
+
+The kubelet's `statusz` is the exception. When the API server proxies to the
+kubelet, the kubelet runs its own authorization for the connecting identity
+(`kube-apiserver-kubelet-client`), and it authorizes `/statusz` as the resource
+`nodes/statusz`. The built-in `system:kubelet-api-admin` ClusterRole — which
+kubeadm binds to that identity — grants `nodes/configz`/`nodes/proxy` (so
+`configz`/`flagz` work) but **not `nodes/statusz`**, so a proxied `statusz`
+request comes back `Forbidden`. zeedumper therefore fetches the kubelet's
+`statusz` through the **node-agent strategy** instead (see below), where the
+agent pod connects to the kubelet directly on loopback as its own ServiceAccount.
+With `--no-node-pods`, the kubelet's `statusz` falls back to the proxy and is
+reported as a per-page `Forbidden` error; `flagz` and `configz` still succeed.
 
 ## Effective configuration (configz defaults filling)
 
@@ -48,17 +61,33 @@ without filling.
 
 `kube-controller-manager`, `kube-scheduler`, and `kube-proxy` bind their serving
 ports to `127.0.0.1`, so they are **not reachable through the API server
-proxy**. To dump them, zeedumper temporarily:
+proxy**. The kubelet's `statusz` is reachable through the proxy but blocked by
+the kubelet's own authorization (see *Supported components* above). To dump
+these, zeedumper temporarily:
 
 1. creates a `ServiceAccount` (in `--namespace`, default `kube-system`),
-2. binds it to the built-in `system:monitoring` ClusterRole — which grants
-   `GET` on the `/flagz` and `/statusz` non-resource URLs,
+2. grants it the permissions each target needs:
+   - the built-in `system:monitoring` ClusterRole — which grants `GET` on the
+     `/flagz` and `/statusz` non-resource URLs the loopback components serve, and
+   - **only when the kubelet is dumped**, a dedicated ClusterRole granting `get`
+     on the `nodes/statusz` resource (the kubelet authorizes `/statusz` as a
+     resource, not a non-resource URL, so `system:monitoring` does not cover it
+     and no built-in role grants it),
 3. schedules a short-lived **host-network** pod (tolerating all taints) on each
-   eligible node, which `curl`s the loopback endpoints using the
-   ServiceAccount's projected token,
+   eligible node, which `curl`s the loopback endpoints — and the kubelet's
+   `https://127.0.0.1:10250/statusz` — using the ServiceAccount's projected
+   token,
 4. collects the output from the pod logs, and
-5. **deletes the pod, ClusterRoleBinding, and ServiceAccount** — including if
-   the run errors or is interrupted.
+5. **deletes the pod(s), ClusterRoleBinding(s), the kubelet-statusz ClusterRole,
+   and the ServiceAccount** — including if the run errors or is interrupted.
+
+Only the resources actually needed for the requested components are created: a
+kubelet-only dump creates the `nodes/statusz` ClusterRole and binding but not
+the `system:monitoring` binding, and vice versa.
+
+The kubelet runs on **every** node, so a kubelet dump schedules an agent pod on
+every node (like `kube-proxy`), not just the control plane. Its `flagz` and
+`configz` still come from the API proxy; only `statusz` is fetched by the pod.
 
 Before creating any RBAC, zeedumper runs a **pre-pull check**: a throwaway pod
 (no RBAC, no host network) that does nothing but pull the agent image on a
@@ -68,14 +97,18 @@ node-agent components are reported with that error, and no ServiceAccount or
 ClusterRoleBinding is created.
 
 This is the one part of the tool that mutates the cluster. Disable it with
-`--no-node-pods` (those three components then fall back to the API proxy, which
-typically reports a connection error). The agent image is configurable with
+`--no-node-pods` (the loopback components then fall back to the API proxy, which
+typically reports a connection error, and the kubelet's `statusz` falls back to
+the proxy's `Forbidden` error). The agent image is configurable with
 `--node-pod-image` (default `curlimages/curl:latest`); the node must be able to
 pull it.
 
 Beyond the proxy permissions, the node-agent strategy additionally requires
-`create`/`delete` on `serviceaccounts`, `pods`, and
+`create`/`delete` on `serviceaccounts`, `pods`, `clusterroles`, and
 `clusterrolebindings`, plus the ability to bind the `system:monitoring` role.
+Creating the kubelet-statusz ClusterRole is also subject to RBAC's
+escalation-prevention rule, so your identity must itself hold `get` on
+`nodes/statusz` (or the `escalate` verb on `clusterroles`).
 
 ## Install
 
@@ -158,8 +191,10 @@ Your kubeconfig identity needs:
 - `get`/`list` on `nodes`, and `nodes/proxy` (for the kubelet's z-pages),
 - `list` on `pods` in `--namespace`,
 - and, unless `--no-node-pods` is set, `create`/`delete` on `serviceaccounts`
-  and `pods` in `--namespace` plus `create`/`delete` on `clusterrolebindings`,
-  with permission to bind the `system:monitoring` ClusterRole.
+  and `pods` in `--namespace` plus `create`/`delete` on `clusterroles` and
+  `clusterrolebindings`, with permission to bind the `system:monitoring`
+  ClusterRole and (for the kubelet's `statusz`) to grant `nodes/statusz` —
+  i.e. your identity holds that permission or the `escalate` verb.
 
 ## Testing
 

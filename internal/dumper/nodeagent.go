@@ -44,6 +44,14 @@ const (
 	// monitoringClusterRole already grants GET on the /flagz, /statusz,
 	// /metrics and /healthz non-resource URLs the components serve.
 	monitoringClusterRole = "system:monitoring"
+
+	// kubeletStatuszURL is the kubelet's /statusz on its secure port, curl'd
+	// from a host-network pod on the node. Unlike the other components, the
+	// kubelet authorizes this as the resource nodes/statusz rather than a
+	// non-resource URL, so system:monitoring does not cover it — the node agent
+	// grants the SA a dedicated nodes/statusz ClusterRole (see setup).
+	kubeletStatuszURL = "https://127.0.0.1:10250/statusz"
+
 	//nolint:gosec // G101: this is the well-known projected-token mount path, not a credential.
 	agentTokenPath = "/var/run/secrets/kubernetes.io/serviceaccount/token"
 
@@ -73,7 +81,9 @@ type nodeWork struct {
 // returns, including on error or cancellation.
 func gatherViaNodePods(ctx context.Context, client *k8s.Client, requested, pages []string, opts Options) ([]Component, error) {
 	wanted := wantedLocalComponents(requested)
-	if len(wanted) == 0 {
+	kubeletStatusz := kubeletStatuszWanted(requested, pages)
+
+	if len(wanted) == 0 && !kubeletStatusz {
 		return nil, nil
 	}
 
@@ -89,11 +99,13 @@ func gatherViaNodePods(ctx context.Context, client *k8s.Client, requested, pages
 		return nil, fmt.Errorf("listing nodes: %w", err)
 	}
 
-	work, covered := buildNodeWork(nodes.Items, wanted, pages)
+	work, covered := buildNodeWork(nodes.Items, wanted, pages, kubeletStatusz)
 	results := map[string][]Instance{} // component -> instances
 
-	// Components asked for but with no eligible node (e.g. a managed control
-	// plane) get a clear placeholder rather than silently vanishing.
+	// Loopback components asked for but with no eligible node (e.g. a managed
+	// control plane) get a clear placeholder rather than silently vanishing.
+	// The kubelet is deliberately excluded: it is owned by the proxy path and
+	// only augmented with statusz here, so it is never in `covered`.
 	for name := range wanted {
 		if !covered[name] {
 			results[name] = append(results[name],
@@ -102,12 +114,24 @@ func gatherViaNodePods(ctx context.Context, client *k8s.Client, requested, pages
 	}
 
 	if len(work) > 0 {
-		if err := runNodeAgents(ctx, cs, namespace, work, covered, opts, results); err != nil {
+		if err := runNodeAgents(ctx, cs, namespace, work, covered, opts, results, len(wanted) > 0, kubeletStatusz); err != nil {
 			return nil, err
 		}
 	}
 
 	return assembleLocalResults(results), nil
+}
+
+// kubeletStatuszWanted reports whether the kubelet's statusz page should be
+// fetched via the node agent (the kubelet is otherwise reached through the API
+// proxy, but statusz is authorized as nodes/statusz, which the proxy path's
+// kubelet client identity lacks).
+func kubeletStatuszWanted(requested, pages []string) bool {
+	if !slices.Contains(requested, "kubelet") {
+		return false
+	}
+
+	return len(pages) == 0 || slices.Contains(pages, "statusz")
 }
 
 // wantedLocalComponents returns the loopback components the caller asked for.
@@ -125,11 +149,11 @@ func wantedLocalComponents(requested []string) map[string]localComponent {
 
 // buildNodeWork produces the per-node fetch list and reports which components
 // ended up with at least one eligible node.
-func buildNodeWork(nodes []corev1.Node, wanted map[string]localComponent, pages []string) (work []nodeWork, covered map[string]bool) {
+func buildNodeWork(nodes []corev1.Node, wanted map[string]localComponent, pages []string, kubeletStatusz bool) (work []nodeWork, covered map[string]bool) {
 	covered = map[string]bool{}
 
 	for _, node := range nodes {
-		specs := nodeFetchSpecs(node, wanted, pages, covered)
+		specs := nodeFetchSpecs(node, wanted, pages, kubeletStatusz, covered)
 		if len(specs) > 0 {
 			work = append(work, nodeWork{node: node.Name, specs: specs})
 		}
@@ -140,7 +164,7 @@ func buildNodeWork(nodes []corev1.Node, wanted map[string]localComponent, pages 
 
 // nodeFetchSpecs builds the endpoints to fetch from one node, marking the
 // covered set as a side effect.
-func nodeFetchSpecs(node corev1.Node, wanted map[string]localComponent, pages []string, covered map[string]bool) []fetchSpec {
+func nodeFetchSpecs(node corev1.Node, wanted map[string]localComponent, pages []string, kubeletStatusz bool, covered map[string]bool) []fetchSpec {
 	controlPlane := isControlPlane(node)
 
 	var specs []fetchSpec
@@ -160,12 +184,23 @@ func nodeFetchSpecs(node corev1.Node, wanted map[string]localComponent, pages []
 		}
 	}
 
+	// The kubelet runs on every node. Its statusz is grafted onto the
+	// proxy-discovered kubelet instances later, so it is intentionally left out
+	// of `covered` (no placeholder handling here).
+	if kubeletStatusz {
+		specs = append(specs, fetchSpec{
+			component: "kubelet",
+			page:      "statusz",
+			url:       kubeletStatuszURL,
+		})
+	}
+
 	return specs
 }
 
 // runNodeAgents performs the pre-pull check, sets up (and always tears down)
 // the temporary RBAC, and launches/collects an agent pod per node.
-func runNodeAgents(ctx context.Context, cs kubernetes.Interface, namespace string, work []nodeWork, covered map[string]bool, opts Options, results map[string][]Instance) error {
+func runNodeAgents(ctx context.Context, cs kubernetes.Interface, namespace string, work []nodeWork, covered map[string]bool, opts Options, results map[string][]Instance, bindMonitoring, bindKubeletStatusz bool) error {
 	runID := opts.runID()
 	image := opts.nodePodImage()
 
@@ -185,7 +220,10 @@ func runNodeAgents(ctx context.Context, cs kubernetes.Interface, namespace strin
 		return nil
 	}
 
-	ra := &rbacAgent{cs: cs, namespace: namespace, runID: runID, image: image}
+	ra := &rbacAgent{
+		cs: cs, namespace: namespace, runID: runID, image: image,
+		bindMonitoring: bindMonitoring, bindKubeletStatusz: bindKubeletStatusz,
+	}
 	if err := ra.setup(ctx); err != nil {
 		return fmt.Errorf("setting up node-agent RBAC: %w", err)
 	}
@@ -198,8 +236,8 @@ func runNodeAgents(ctx context.Context, cs kubernetes.Interface, namespace strin
 		ra.teardown(cleanupCtx)
 	}()
 
-	fmt.Fprintf(stderr, "node-agent: created serviceaccount/%s and clusterrolebinding (-> %s); launching %d pod(s)\n",
-		ra.name(), monitoringClusterRole, len(work))
+	fmt.Fprintf(stderr, "node-agent: created serviceaccount/%s and %s; launching %d pod(s)\n",
+		ra.name(), ra.grantSummary(), len(work))
 
 	ra.launchAndCollect(ctx, work, curlTimeoutSeconds(opts.Timeout), results)
 
@@ -257,7 +295,9 @@ func curlTimeoutSeconds(d time.Duration) int {
 }
 
 // assembleLocalResults flattens the per-component instance map into Components
-// in canonical display order.
+// in canonical display order. The kubelet is included when present but is later
+// merged into its proxy-discovered component by the caller rather than emitted
+// standalone.
 func assembleLocalResults(results map[string][]Instance) []Component {
 	var out []Component
 
@@ -266,6 +306,11 @@ func assembleLocalResults(results map[string][]Instance) []Component {
 			sortInstances(insts)
 			out = append(out, Component{Name: lc.name, Instances: insts})
 		}
+	}
+
+	if insts, ok := results["kubelet"]; ok {
+		sortInstances(insts)
+		out = append(out, Component{Name: "kubelet", Instances: insts})
 	}
 
 	return out
@@ -436,18 +481,47 @@ func decodeAgentField(s string) string {
 	return string(decoded)
 }
 
-// rbacAgent owns the lifecycle of the temporary SA, ClusterRoleBinding and pods.
+// rbacAgent owns the lifecycle of the temporary SA, ClusterRoleBinding(s),
+// ClusterRole and pods.
 type rbacAgent struct {
 	cs        kubernetes.Interface
 	namespace string
 	runID     string
 	image     string
+
+	// bindMonitoring binds the SA to system:monitoring (for the loopback
+	// components' non-resource z-page URLs). bindKubeletStatusz creates and
+	// binds a dedicated nodes/statusz ClusterRole for the kubelet.
+	bindMonitoring     bool
+	bindKubeletStatusz bool
 }
 
 func (r *rbacAgent) name() string { return "zeedumper-zpages-" + r.runID }
 
+// statuszName is the name of the dedicated kubelet nodes/statusz ClusterRole and
+// its binding.
+func (r *rbacAgent) statuszName() string { return r.name() + "-kubelet-statusz" }
+
 func (r *rbacAgent) labels() map[string]string {
 	return map[string]string{"app": "zeedumper-zpages", "zeedumper-run": r.runID}
+}
+
+// grantSummary describes the RBAC the agent created, for the narration line.
+func (r *rbacAgent) grantSummary() string {
+	var grants []string
+	if r.bindMonitoring {
+		grants = append(grants, "clusterrolebinding -> "+monitoringClusterRole)
+	}
+
+	if r.bindKubeletStatusz {
+		grants = append(grants, "clusterrole+binding (nodes/statusz)")
+	}
+
+	if len(grants) == 0 {
+		return "no rbac"
+	}
+
+	return strings.Join(grants, " and ")
 }
 
 func (r *rbacAgent) setup(ctx context.Context) error {
@@ -457,24 +531,64 @@ func (r *rbacAgent) setup(ctx context.Context) error {
 		return fmt.Errorf("creating serviceaccount: %w", err)
 	}
 
-	_, err := r.cs.RbacV1().ClusterRoleBindings().Create(ctx, &rbacv1.ClusterRoleBinding{
-		ObjectMeta: metav1.ObjectMeta{Name: r.name(), Labels: r.labels()},
-		RoleRef: rbacv1.RoleRef{
-			APIGroup: "rbac.authorization.k8s.io",
-			Kind:     "ClusterRole",
-			Name:     monitoringClusterRole,
-		},
-		Subjects: []rbacv1.Subject{{
-			Kind:      "ServiceAccount",
-			Name:      r.name(),
-			Namespace: r.namespace,
-		}},
-	}, metav1.CreateOptions{})
-	if err != nil {
-		return fmt.Errorf("creating clusterrolebinding: %w", err)
+	if r.bindMonitoring {
+		_, err := r.cs.RbacV1().ClusterRoleBindings().Create(ctx, &rbacv1.ClusterRoleBinding{
+			ObjectMeta: metav1.ObjectMeta{Name: r.name(), Labels: r.labels()},
+			RoleRef: rbacv1.RoleRef{
+				APIGroup: "rbac.authorization.k8s.io",
+				Kind:     "ClusterRole",
+				Name:     monitoringClusterRole,
+			},
+			Subjects: []rbacv1.Subject{r.subject()},
+		}, metav1.CreateOptions{})
+		if err != nil {
+			return fmt.Errorf("creating clusterrolebinding: %w", err)
+		}
+	}
+
+	if r.bindKubeletStatusz {
+		if err := r.setupKubeletStatusz(ctx); err != nil {
+			return err
+		}
 	}
 
 	return nil
+}
+
+// setupKubeletStatusz creates the dedicated ClusterRole granting the kubelet's
+// nodes/statusz resource and binds the agent SA to it. The kubelet authorizes
+// /statusz as this resource (not a non-resource URL), so system:monitoring is
+// insufficient and no built-in role grants it.
+func (r *rbacAgent) setupKubeletStatusz(ctx context.Context) error {
+	if _, err := r.cs.RbacV1().ClusterRoles().Create(ctx, &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{Name: r.statuszName(), Labels: r.labels()},
+		Rules: []rbacv1.PolicyRule{{
+			APIGroups: []string{""},
+			Resources: []string{"nodes/statusz"},
+			Verbs:     []string{"get"},
+		}},
+	}, metav1.CreateOptions{}); err != nil {
+		return fmt.Errorf("creating kubelet statusz clusterrole: %w", err)
+	}
+
+	_, err := r.cs.RbacV1().ClusterRoleBindings().Create(ctx, &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: r.statuszName(), Labels: r.labels()},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: "rbac.authorization.k8s.io",
+			Kind:     "ClusterRole",
+			Name:     r.statuszName(),
+		},
+		Subjects: []rbacv1.Subject{r.subject()},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		return fmt.Errorf("creating kubelet statusz clusterrolebinding: %w", err)
+	}
+
+	return nil
+}
+
+func (r *rbacAgent) subject() rbacv1.Subject {
+	return rbacv1.Subject{Kind: "ServiceAccount", Name: r.name(), Namespace: r.namespace}
 }
 
 func (r *rbacAgent) teardown(ctx context.Context) {
@@ -482,8 +596,16 @@ func (r *rbacAgent) teardown(ctx context.Context) {
 	_ = r.cs.CoreV1().Pods(r.namespace).DeleteCollection(ctx,
 		metav1.DeleteOptions{}, metav1.ListOptions{LabelSelector: selector})
 
-	if err := r.cs.RbacV1().ClusterRoleBindings().Delete(ctx, r.name(), metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-		fmt.Fprintf(stderr, "node-agent: warning: failed to delete clusterrolebinding %s: %v\n", r.name(), err)
+	// Delete every resource this run may have created; NotFound is expected for
+	// any that a given run did not need.
+	for _, crb := range []string{r.name(), r.statuszName()} {
+		if err := r.cs.RbacV1().ClusterRoleBindings().Delete(ctx, crb, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			fmt.Fprintf(stderr, "node-agent: warning: failed to delete clusterrolebinding %s: %v\n", crb, err)
+		}
+	}
+
+	if err := r.cs.RbacV1().ClusterRoles().Delete(ctx, r.statuszName(), metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+		fmt.Fprintf(stderr, "node-agent: warning: failed to delete clusterrole %s: %v\n", r.statuszName(), err)
 	}
 
 	if err := r.cs.CoreV1().ServiceAccounts(r.namespace).Delete(ctx, r.name(), metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {

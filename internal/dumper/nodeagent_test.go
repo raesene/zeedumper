@@ -63,6 +63,55 @@ func TestBuildScriptCoversEveryEndpoint(t *testing.T) {
 	}
 }
 
+func TestKubeletStatuszWanted(t *testing.T) {
+	tests := []struct {
+		name      string
+		requested []string
+		pages     []string
+		want      bool
+	}{
+		{name: "kubelet, all pages", requested: []string{"kubelet"}, pages: nil, want: true},
+		{name: "kubelet, statusz only", requested: []string{"kubelet"}, pages: []string{"statusz"}, want: true},
+		{name: "kubelet, but statusz filtered out", requested: []string{"kubelet"}, pages: []string{"flagz", "configz"}, want: false},
+		{name: "kubelet not requested", requested: []string{"kube-proxy"}, pages: nil, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := kubeletStatuszWanted(tt.requested, tt.pages); got != tt.want {
+				t.Errorf("kubeletStatuszWanted(%v, %v) = %v, want %v", tt.requested, tt.pages, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNodeFetchSpecsKubeletStatusz(t *testing.T) {
+	node := corev1.Node{}
+	node.Name = "worker-1" // not a control-plane node
+
+	// Kubelet statusz is added on every node and never marks covered (the
+	// kubelet is owned by the proxy path and only augmented here).
+	specs := nodeFetchSpecs(node, nil, nil, true, map[string]bool{})
+	if len(specs) != 1 {
+		t.Fatalf("expected 1 spec, got %d: %+v", len(specs), specs)
+	}
+
+	if specs[0].component != "kubelet" || specs[0].page != "statusz" || specs[0].url != kubeletStatuszURL {
+		t.Errorf("unexpected kubelet spec: %+v", specs[0])
+	}
+
+	covered := map[string]bool{}
+	nodeFetchSpecs(node, nil, nil, true, covered)
+
+	if covered["kubelet"] {
+		t.Error("kubelet must not be marked covered")
+	}
+
+	// When not wanted, no kubelet spec is produced.
+	if specs := nodeFetchSpecs(node, nil, nil, false, map[string]bool{}); len(specs) != 0 {
+		t.Errorf("expected no specs when kubelet statusz not wanted, got %+v", specs)
+	}
+}
+
 func TestSanitizeName(t *testing.T) {
 	if got := sanitizeName("Node.Example_01"); got != "node-example-01" {
 		t.Errorf("sanitizeName = %q", got)
